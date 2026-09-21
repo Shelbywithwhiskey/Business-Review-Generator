@@ -1,0 +1,82 @@
+import { NextRequest, NextResponse } from "next/server";
+import { z } from "zod";
+import { prisma } from "@/lib/db";
+import { getOrCreateDefaultTemplate, DEFAULT_QBR_SECTIONS } from "@/lib/templates";
+import { computeComparison, computeHealthScore, evaluateRules } from "@/lib/analytics";
+import { generateExecutiveSummary, generateSectionNarrative, generateRecommendation } from "@/lib/ai";
+
+export const maxDuration = 300;
+
+const schema = z.object({
+  periodStart: z.string(),
+  periodEnd: z.string(),
+});
+
+export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const { id: customerId } = await params;
+  const body = await req.json();
+  const parsed = schema.safeParse(body);
+  if (!parsed.success) return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
+
+  const range = { start: new Date(parsed.data.periodStart), end: new Date(parsed.data.periodEnd) };
+  const template = await getOrCreateDefaultTemplate();
+  const comparison = await computeComparison(customerId, range);
+  const health = computeHealthScore(comparison.current);
+  const rules = evaluateRules(comparison.current, comparison);
+
+  const report = await prisma.report.create({
+    data: {
+      customerId,
+      templateId: template.id,
+      type: "QBR",
+      periodStart: range.start,
+      periodEnd: range.end,
+      compareMode: "previous_period",
+    },
+  });
+
+  await prisma.healthScore.create({
+    data: { customerId, reportId: report.id, overallScore: health.overall, dimensionScores: health.dimensions },
+  });
+
+  const sectionsData: Record<string, unknown> = {
+    executive_summary: { metrics: comparison.current, comparison: comparison.changePct, health },
+    jobs_performance: comparison.current.jobs,
+    invoice_performance: comparison.current.invoices,
+    technician_performance: comparison.current.technicianRankings,
+    opportunities: rules,
+  };
+
+  for (const [order, section] of DEFAULT_QBR_SECTIONS.entries()) {
+    const rule = rules.find((r) => sectionAppliesToRule(section.key, r.key));
+    const [narrative, recommendation] = await Promise.all([
+      section.key === "executive_summary"
+        ? generateExecutiveSummary(comparison.current, comparison, health)
+        : generateSectionNarrative(section.key, sectionsData[section.key]),
+      rule ? generateRecommendation(section.key, rule) : Promise.resolve(null),
+    ]);
+
+    await prisma.reportSection.create({
+      data: {
+        reportId: report.id,
+        sectionKey: section.key,
+        order,
+        contentJson: sectionsData[section.key] as any,
+        narrativeText: narrative,
+        recommendationText: recommendation,
+      },
+    });
+  }
+
+  return NextResponse.json({ reportId: report.id });
+}
+
+function sectionAppliesToRule(sectionKey: string, ruleKey: string): boolean {
+  const map: Record<string, string[]> = {
+    jobs_performance: ["cancellation_rate_increase", "technician_workload_concentration"],
+    invoice_performance: ["invoice_aging_high"],
+    technician_performance: ["technician_workload_concentration"],
+    opportunities: ["zuper_pay_opportunity"],
+  };
+  return map[sectionKey]?.includes(ruleKey) ?? false;
+}
