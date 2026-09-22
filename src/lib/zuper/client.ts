@@ -1,10 +1,16 @@
-// Generic Zuper API client.
+// Zuper API client.
 //
-// IMPORTANT: endpoint paths and response field names below are best-guess
-// based on common Zuper REST conventions and MUST be verified against your
-// account's API reference (https://developers.zuperpro.com) before a real
-// sync. Adjust the `path` and field mappings in modules.ts — the pagination
-// and auth handling here should not need to change.
+// Base URL, auth, pagination, and every endpoint path used in modules.ts
+// were verified live against two real Zuper accounts (2026-09-22). Two
+// things learned that are NOT what Zuper's general developer docs describe:
+//   1. The data-center base URL is per-tenant and must be discovered via
+//      accounts.zuperpro.com — it is not a fixed "east"/"west" domain, and
+//      guessing wrong 404s or 503s.
+//   2. None of start_date/end_date/from/to/created_from/created_to filter
+//      list endpoints server-side — total_records was identical with or
+//      without them on every endpoint tested. So this client always pulls
+//      full history; period filtering happens locally in lib/analytics.ts
+//      against the synced rows.
 
 export class ZuperApiError extends Error {
   constructor(
@@ -17,58 +23,121 @@ export class ZuperApiError extends Error {
   }
 }
 
+/** Resolves a company's Zuper login name to its real data-center API base URL (e.g. https://us-east-1.zuperpro.com/api). */
+export async function discoverZuperBaseUrl(companyName: string): Promise<string> {
+  const res = await fetch("https://accounts.zuperpro.com/api/config", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ company_name: companyName }),
+  });
+  if (!res.ok) {
+    throw new ZuperApiError(`Could not resolve Zuper data center for "${companyName}"`, res.status);
+  }
+  const body = (await res.json()) as { config?: { dc_api_url?: string } };
+  const dcApiUrl = body.config?.dc_api_url;
+  if (!dcApiUrl) {
+    throw new ZuperApiError(`Zuper data-center discovery returned no dc_api_url for "${companyName}"`, 502, body);
+  }
+  return `${dcApiUrl.replace(/\/$/, "")}/api`;
+}
+
+interface ListEnvelope<T> {
+  data: T[];
+  total_records?: number;
+  total_pages?: number;
+  current_page?: number;
+}
+
 export class ZuperClient {
   constructor(
     private apiKey: string,
-    private baseUrl: string = process.env.ZUPER_API_BASE_URL ?? "https://api.zuperpro.com"
+    /** Must already include the /api suffix — see discoverZuperBaseUrl. */
+    private baseUrl: string
   ) {}
 
   private async request<T>(path: string, params: Record<string, string | number | undefined> = {}): Promise<T> {
-    const url = new URL(path, this.baseUrl);
+    const qs = new URLSearchParams();
     for (const [key, value] of Object.entries(params)) {
-      if (value !== undefined) url.searchParams.set(key, String(value));
+      if (value !== undefined) qs.set(key, String(value));
     }
+    const query = qs.toString();
+    const url = `${this.baseUrl.replace(/\/$/, "")}/${path.replace(/^\//, "")}${query ? `?${query}` : ""}`;
 
-    const res = await fetch(url.toString(), {
+    const res = await fetch(url, {
       headers: {
         "x-api-key": this.apiKey,
         Accept: "application/json",
       },
     });
 
+    const text = await res.text();
     if (!res.ok) {
-      const body = await res.json().catch(() => undefined);
+      let body: unknown = text;
+      try {
+        body = JSON.parse(text);
+      } catch {
+        // non-JSON error body (e.g. an HTML 404 page from a wrong path) — keep raw text
+      }
       throw new ZuperApiError(`Zuper API ${res.status} on ${path}`, res.status, body);
     }
 
-    return res.json() as Promise<T>;
+    try {
+      return JSON.parse(text) as T;
+    } catch {
+      throw new ZuperApiError(`Zuper API returned non-JSON response on ${path}`, res.status, text.slice(0, 500));
+    }
   }
 
-  /** Generic paginated GET, yields one page of items at a time. */
+  /** Paginated GET against the standard {data: [...], total_records, total_pages, current_page} envelope. Max count is 1000. */
   async *paginate<T>(
     path: string,
-    itemsKey: string,
     baseParams: Record<string, string | number | undefined> = {},
-    pageSize = 100
+    pageSize = 200
   ): AsyncGenerator<T[]> {
     let page = 1;
     while (true) {
-      const data = await this.request<Record<string, unknown>>(path, {
-        ...baseParams,
-        page,
-        per_page: pageSize,
-      });
-      const items = (data[itemsKey] ?? []) as T[];
+      const res = await this.request<ListEnvelope<T>>(path, { ...baseParams, page, count: pageSize });
+      const items = res.data ?? [];
       if (items.length === 0) return;
       yield items;
-      if (items.length < pageSize) return;
+      const totalPages = res.total_pages ?? page;
+      if (page >= totalPages || items.length < pageSize) return;
       page += 1;
     }
   }
 
+  /** For endpoints with a nested list, e.g. GET /timesheets -> { data: { timesheets: [...] } }. */
+  async *paginateNested<T>(
+    path: string,
+    nestedKey: string,
+    baseParams: Record<string, string | number | undefined> = {},
+    pageSize = 200
+  ): AsyncGenerator<T[]> {
+    let page = 1;
+    while (true) {
+      const res = await this.request<{ data: Record<string, unknown>; total_pages?: number }>(path, {
+        ...baseParams,
+        page,
+        count: pageSize,
+      });
+      const items = (res.data?.[nestedKey] as T[]) ?? [];
+      if (items.length === 0) return;
+      yield items;
+      const totalPages = res.total_pages ?? page;
+      if (page >= totalPages || items.length < pageSize) return;
+      page += 1;
+    }
+  }
+
+  /** For endpoints that return a single {data: {...}} object, e.g. GET /team. */
+  async get<T>(path: string, params: Record<string, string | number | undefined> = {}): Promise<T> {
+    const res = await this.request<{ data: T }>(path, params);
+    return res.data;
+  }
+
   async testConnection(): Promise<boolean> {
     try {
-      await this.request("/api/organization", {});
+      await this.request("/organization", {});
       return true;
     } catch {
       return false;

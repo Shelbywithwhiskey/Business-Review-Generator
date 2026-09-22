@@ -26,6 +26,7 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
   const [apiKey, setApiKey] = useState("");
   const [savingKey, setSavingKey] = useState(false);
   const [verifyResult, setVerifyResult] = useState<string | null>(null);
+  const [credentialError, setCredentialError] = useState<string | null>(null);
   const [period, setPeriod] = useState(defaultPeriod());
   const [syncing, setSyncing] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
@@ -46,12 +47,18 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
   async function saveApiKey(e: React.FormEvent) {
     e.preventDefault();
     setSavingKey(true);
-    await fetch(`/api/customers/${id}/credentials`, {
+    setCredentialError(null);
+    const res = await fetch(`/api/customers/${id}/credentials`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ apiKey }),
     });
     setSavingKey(false);
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      setCredentialError(data.error ?? "Failed to save API key");
+      return;
+    }
     setApiKey("");
     await loadCustomer();
   }
@@ -151,6 +158,10 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
               {savingKey ? "Saving…" : "Save key"}
             </button>
           </form>
+          <p className="mb-3 text-xs text-neutral-400">
+            The correct Zuper data center is auto-discovered from the Zuper account ID above.
+          </p>
+          {credentialError && <p className="mb-2 text-sm text-red-500">{credentialError}</p>}
           {customer.credential && (
             <button onClick={verifyConnection} className="text-sm underline">
               Test connection
@@ -216,6 +227,14 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
               <Kpi label="Invoices" value={metrics.current.invoices.total} />
               <Kpi label="Revenue" value={`$${metrics.current.invoices.totalPaid.toFixed(0)}`} />
               <Kpi label="Outstanding" value={`$${metrics.current.invoices.outstanding.toFixed(0)}`} />
+              <Kpi label="90+ days past due" value={`$${metrics.current.invoices.aging.d90plus.toFixed(0)}`} />
+              <Kpi label="Quotes sent" value={`${metrics.current.quotes.total} ($${metrics.current.quotes.totalValue.toFixed(0)})`} />
+              <Kpi label="Quote conversion" value={`${(metrics.current.quotes.conversionRate * 100).toFixed(0)}%`} />
+              <Kpi label="Collected digitally" value={`${(metrics.current.payments.onlineShare * 100).toFixed(0)}%`} />
+              <Kpi label="Inventory value" value={`$${metrics.current.inventory.totalValue.toFixed(0)}`} />
+              <Kpi label="Low stock items" value={metrics.current.inventory.lowStockCount} />
+              <Kpi label="Account LTV (Zuper)" value={`$${metrics.current.ledger.totalLtv.toFixed(0)}`} />
+              <Kpi label="Receivables (Zuper)" value={`$${metrics.current.ledger.totalReceivables.toFixed(0)}`} />
               <Kpi label="Health score" value={`${metrics.health.overall}/100`} />
             </div>
             {metrics.rules.length > 0 && (

@@ -6,6 +6,7 @@ import type {
   HealthScoreResult,
   JobMetrics,
   InvoiceMetrics,
+  QuoteMetrics,
   TechnicianRanking,
 } from "@/lib/analytics";
 
@@ -88,7 +89,13 @@ function templateJobsNarrative(m: JobMetrics): string {
 }
 
 function templateInvoiceNarrative(m: InvoiceMetrics): string {
-  return `${m.total} invoices were issued totaling ${money(m.totalAmount)}, with ${money(m.totalPaid)} collected and ${money(m.outstanding)} outstanding. Average invoice value was ${money(m.avgInvoiceValue)}.`;
+  const onTime = m.onTimePaymentRate != null ? ` On-time payment rate was ${pct(m.onTimePaymentRate)}.` : "";
+  return `${m.total} invoices were issued totaling ${money(m.totalAmount)}, with ${money(m.totalPaid)} collected and ${money(m.outstanding)} outstanding.${onTime} Average invoice value was ${money(m.avgInvoiceValue)}.`;
+}
+
+function templateQuoteNarrative(m: QuoteMetrics): string {
+  if (m.total === 0) return "No quotes were sent during this period.";
+  return `${m.total} quotes were sent totaling ${money(m.totalValue)}, of which ${m.convertedCount} converted (${pct(m.conversionRate)} conversion rate) worth ${money(m.convertedValue)}. Average quote value was ${money(m.avgQuoteValue)}.`;
 }
 
 function templateTechnicianNarrative(rankings: TechnicianRanking[]): string {
@@ -111,6 +118,10 @@ const RECOMMENDATION_TEMPLATES: Record<string, (rule: RuleMatch) => string> = {
     `Recommendation: ${r.detail} Review workload distribution to determine whether additional technicians need onboarding or assignments can be rebalanced.`,
   zuper_pay_opportunity: (r) =>
     `Recommendation: ${r.detail} This is a strong candidate for enabling Zuper Pay to consolidate payment processing.`,
+  quote_conversion_low: (r) =>
+    `Recommendation: ${r.detail} Review quote follow-up cadence and pricing competitiveness for quotes that stalled or expired.`,
+  inventory_low_stock: (r) =>
+    `Recommendation: ${r.detail} Reorder affected parts to avoid job delays from stockouts.`,
 };
 
 function templateRecommendation(rule: RuleMatch): string {
@@ -142,6 +153,8 @@ export async function generateSectionNarrative(sectionKey: string, sectionMetric
         return templateJobsNarrative(sectionMetrics as JobMetrics);
       case "invoice_performance":
         return templateInvoiceNarrative(sectionMetrics as InvoiceMetrics);
+      case "quotes_performance":
+        return templateQuoteNarrative(sectionMetrics as QuoteMetrics);
       case "technician_performance":
         return templateTechnicianNarrative(sectionMetrics as TechnicianRanking[]);
       case "opportunities":

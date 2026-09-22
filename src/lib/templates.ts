@@ -4,6 +4,7 @@ export const DEFAULT_QBR_SECTIONS = [
   { key: "executive_summary", title: "Executive Summary" },
   { key: "jobs_performance", title: "Jobs Performance" },
   { key: "invoice_performance", title: "Invoice Performance" },
+  { key: "quotes_performance", title: "Quotes & Proposals" },
   { key: "technician_performance", title: "Technician Performance" },
   { key: "opportunities", title: "Opportunities" },
 ];

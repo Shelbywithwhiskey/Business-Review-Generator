@@ -18,16 +18,21 @@ model Customer {
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
-  credential      ApiCredential?
-  syncRuns        SyncRun[]
-  jobs            Job[]
-  invoices        Invoice[]
-  technicians     Technician[]
-  payments        Payment[]
-  metricSnapshots MetricSnapshot[]
-  healthScores    HealthScore[]
-  opportunities   OpportunitySignal[]
-  reports         Report[]
+  credential        ApiCredential?
+  syncRuns          SyncRun[]
+  jobs              Job[]
+  invoices          Invoice[]
+  technicians       Technician[]
+  payments          Payment[]
+  quotes            Quote[]
+  products          Product[]
+  expenses          Expense[]
+  timesheetEvents   TimesheetEvent[]
+  endCustomers      EndCustomerLedger[]
+  metricSnapshots   MetricSnapshot[]
+  healthScores      HealthScore[]
+  opportunities     OpportunitySignal[]
+  reports           Report[]
 }
 
 model ApiCredential {
@@ -88,9 +93,11 @@ model Invoice {
   customerId     String
   customer       Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
   zuperInvoiceId String
+  invoiceNo      Int?
   status         String
   amount         Decimal   @db.Decimal(12, 2)
   amountPaid     Decimal   @default(0) @db.Decimal(12, 2)
+  isPaid         Boolean   @default(false)
   issuedAt       DateTime
   dueAt          DateTime?
   paidAt         DateTime?
@@ -100,16 +107,44 @@ model Invoice {
   @@index([customerId, issuedAt])
 }
 
+// Zuper calls these "estimates" in the API; the product surfaces them as Quotes/Proposals.
+model Quote {
+  id           String    @id @default(cuid())
+  customerId   String
+  customer     Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  zuperQuoteId String
+  quoteNo      Int?
+  status       String // DRAFT | SENT | APPROVED | REJECTED | EXPIRED | ...
+  value        Decimal   @db.Decimal(12, 2)
+  discount     Decimal   @default(0) @db.Decimal(12, 2)
+  isConverted  Boolean   @default(false)
+  isExpired    Boolean   @default(false)
+  estimateAt   DateTime
+  expiryAt     DateTime?
+  sentAt       DateTime?
+  acceptedAt   DateTime?
+  convertedAt  DateTime?
+  syncRunId    String
+
+  @@unique([customerId, zuperQuoteId])
+  @@index([customerId, estimateAt])
+}
+
 model Technician {
   id             String   @id @default(cuid())
   customerId     String
   customer       Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
   zuperUserId    String
   name           String
+  email          String?
+  designation    String? // Technician | Admin | Dispatch | Team Leader | ...
+  hourlyRate     Decimal? @db.Decimal(10, 2)
+  isActive       Boolean  @default(true)
   jobsCompleted  Int      @default(0)
   revenue        Decimal  @default(0) @db.Decimal(12, 2)
   completionRate Decimal  @default(0) @db.Decimal(5, 4)
   avgJobValue    Decimal  @default(0) @db.Decimal(12, 2)
+  hoursWorked    Decimal  @default(0) @db.Decimal(10, 2)
   rating         Decimal? @db.Decimal(3, 2)
   periodStart    DateTime
   periodEnd      DateTime
@@ -119,18 +154,97 @@ model Technician {
 }
 
 model Payment {
-  id             String   @id @default(cuid())
-  customerId     String
-  customer       Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
-  zuperPaymentId String
-  amount         Decimal  @db.Decimal(12, 2)
-  method         String?
-  zuperPayUsed   Boolean  @default(false)
-  paidAt         DateTime
-  syncRunId      String
+  id               String   @id @default(cuid())
+  customerId       String
+  customer         Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  zuperPaymentId   String
+  amount           Decimal  @db.Decimal(12, 2)
+  currency         String?
+  paymentModeName  String? // "Check" | "Credit Card" | ...
+  paymentModeType  String? // "ONLINE" | "OFFLINE" — used as a Zuper Pay / digital-payment proxy
+  actionModule     String? // "INVOICE" | ...
+  status           String? // "SUCCESS" | ...
+  zuperInvoiceId   String?
+  zuperPayUsed     Boolean  @default(false)
+  paidAt           DateTime
+  syncRunId        String
 
   @@unique([customerId, zuperPaymentId])
   @@index([customerId, paidAt])
+}
+
+// Zuper's master product/parts catalog with current stock and pricing —
+// used for inventory-value and low-stock metrics, not job-level parts usage.
+model Product {
+  id              String   @id @default(cuid())
+  customerId      String
+  customer        Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  zuperProductId  String
+  sku             String?
+  name            String
+  category        String?
+  price           Decimal  @default(0) @db.Decimal(12, 2)
+  purchasePrice   Decimal  @default(0) @db.Decimal(12, 2)
+  quantity        Decimal  @default(0) @db.Decimal(12, 2)
+  minQuantity     Decimal  @default(0) @db.Decimal(12, 2)
+  lowStock        Boolean  @default(false)
+  isBillable      Boolean  @default(true)
+  syncRunId       String
+
+  @@unique([customerId, zuperProductId])
+}
+
+// Field shape is unverified against a populated account — see zuper/modules.ts.
+model Expense {
+  id             String    @id @default(cuid())
+  customerId     String
+  customer       Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  zuperExpenseId String
+  amount         Decimal   @db.Decimal(12, 2)
+  isBillable     Boolean   @default(false)
+  category       String?
+  description    String?
+  incurredAt     DateTime
+  syncRunId      String
+
+  @@unique([customerId, zuperExpenseId])
+  @@index([customerId, incurredAt])
+}
+
+// Raw clock-in/out events from /timesheets. Hours worked are derived by
+// pairing CHECK_IN/CHECK_OUT events per technician (see analytics.ts).
+model TimesheetEvent {
+  id                String   @id @default(cuid())
+  customerId        String
+  customer          Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  zuperTimesheetId  String
+  zuperUserId       String
+  userName          String?
+  typeOfCheck       String // CHECK_IN | CHECK_OUT
+  checkedAt         DateTime
+  syncRunId         String
+
+  @@unique([customerId, zuperTimesheetId])
+  @@index([customerId, zuperUserId, checkedAt])
+}
+
+// Zuper's own end-customer ledger (accounts.ltv/receivables/credits) —
+// pulled straight from /customers rather than re-derived, refreshed each sync.
+model EndCustomerLedger {
+  id              String   @id @default(cuid())
+  customerId      String
+  customer        Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  zuperCustomerId String
+  name            String
+  isActive        Boolean  @default(true)
+  noOfJobs        Int      @default(0)
+  ltv             Decimal  @default(0) @db.Decimal(12, 2)
+  receivables     Decimal  @default(0) @db.Decimal(12, 2)
+  credits         Decimal  @default(0) @db.Decimal(12, 2)
+  tags            String[]
+  syncRunId       String
+
+  @@unique([customerId, zuperCustomerId])
 }
 
 model MetricSnapshot {

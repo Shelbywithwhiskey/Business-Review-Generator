@@ -16,7 +16,16 @@ export interface JobMetrics {
   completionRate: number;
   cancellationRate: number;
   totalJobValue: number;
+  avgJobValue: number;
   byServiceType: Record<string, number>;
+}
+
+export interface AgingBuckets {
+  current: number;
+  d1to30: number;
+  d31to60: number;
+  d61to90: number;
+  d90plus: number;
 }
 
 export interface InvoiceMetrics {
@@ -27,21 +36,71 @@ export interface InvoiceMetrics {
   byStatus: Record<string, number>;
   avgInvoiceValue: number;
   outstandingOver60Days: number;
+  aging: AgingBuckets;
+  onTimePaymentRate: number | null;
+}
+
+export interface QuoteMetrics {
+  total: number;
+  totalValue: number;
+  totalDiscount: number;
+  convertedCount: number;
+  convertedValue: number;
+  conversionRate: number;
+  avgQuoteValue: number;
+  byStatus: Record<string, number>;
 }
 
 export interface TechnicianRanking {
   name: string;
+  designation: string | null;
   jobsCompleted: number;
   completionRate: number;
   revenue: number;
   avgJobValue: number;
+  hourlyRate: number | null;
+  hoursWorked: number;
+  laborCost: number | null;
 }
 
 export interface PaymentMetrics {
   total: number;
   totalAmount: number;
-  zuperPayAmount: number;
+  onlineAmount: number;
+  offlineAmount: number;
+  onlineShare: number;
+  /** Alias of onlineShare kept for the existing Zuper Pay opportunity rule — payment_mode_type
+   * ("ONLINE"/"OFFLINE") is the closest proxy Zuper's API exposes for "collected digitally". */
   zuperPayShare: number;
+  byMode: Record<string, number>;
+}
+
+export interface InventoryMetrics {
+  totalItems: number;
+  totalValue: number;
+  totalPurchaseValue: number;
+  lowStockCount: number;
+}
+
+export interface ExpenseMetrics {
+  total: number;
+  totalAmount: number;
+  billableAmount: number;
+}
+
+export interface LedgerCustomer {
+  name: string;
+  ltv: number;
+  receivables: number;
+}
+
+export interface LedgerMetrics {
+  customerCount: number;
+  activeCustomerCount: number;
+  totalLtv: number;
+  totalReceivables: number;
+  totalCredits: number;
+  topByLtv: LedgerCustomer[];
 }
 
 export interface PeriodMetrics {
@@ -49,7 +108,11 @@ export interface PeriodMetrics {
   periodEnd: string;
   jobs: JobMetrics;
   invoices: InvoiceMetrics;
+  quotes: QuoteMetrics;
   payments: PaymentMetrics;
+  inventory: InventoryMetrics;
+  expenses: ExpenseMetrics;
+  ledger: LedgerMetrics;
   technicianRankings: TechnicianRanking[];
   top3TechShareOfJobs: number;
 }
@@ -86,8 +149,13 @@ export async function computeJobMetrics(customerId: string, range: DateRange): P
     completionRate: total ? completed / total : 0,
     cancellationRate: total ? cancelled / total : 0,
     totalJobValue,
+    avgJobValue: total ? totalJobValue / total : 0,
     byServiceType,
   };
+}
+
+function emptyAging(): AgingBuckets {
+  return { current: 0, d1to30: 0, d31to60: 0, d61to90: 0, d90plus: 0 };
 }
 
 export async function computeInvoiceMetrics(customerId: string, range: DateRange): Promise<InvoiceMetrics> {
@@ -96,9 +164,12 @@ export async function computeInvoiceMetrics(customerId: string, range: DateRange
   });
 
   const byStatus: Record<string, number> = {};
+  const aging = emptyAging();
   let totalAmount = 0;
   let totalPaid = 0;
   let outstandingOver60Days = 0;
+  let paidOnTime = 0;
+  let paidWithDueDate = 0;
   const now = Date.now();
 
   for (const inv of invoices) {
@@ -106,9 +177,20 @@ export async function computeInvoiceMetrics(customerId: string, range: DateRange
     totalAmount += Number(inv.amount);
     totalPaid += Number(inv.amountPaid);
     const outstanding = Number(inv.amount) - Number(inv.amountPaid);
+
     if (outstanding > 0 && inv.dueAt) {
       const daysPastDue = (now - inv.dueAt.getTime()) / (1000 * 60 * 60 * 24);
       if (daysPastDue > 60) outstandingOver60Days += outstanding;
+      if (daysPastDue <= 0) aging.current += outstanding;
+      else if (daysPastDue <= 30) aging.d1to30 += outstanding;
+      else if (daysPastDue <= 60) aging.d31to60 += outstanding;
+      else if (daysPastDue <= 90) aging.d61to90 += outstanding;
+      else aging.d90plus += outstanding;
+    }
+
+    if (inv.isPaid && inv.dueAt && inv.paidAt) {
+      paidWithDueDate += 1;
+      if (inv.paidAt.getTime() <= inv.dueAt.getTime()) paidOnTime += 1;
     }
   }
 
@@ -120,6 +202,42 @@ export async function computeInvoiceMetrics(customerId: string, range: DateRange
     byStatus,
     avgInvoiceValue: invoices.length ? totalAmount / invoices.length : 0,
     outstandingOver60Days,
+    aging,
+    onTimePaymentRate: paidWithDueDate ? paidOnTime / paidWithDueDate : null,
+  };
+}
+
+export async function computeQuoteMetrics(customerId: string, range: DateRange): Promise<QuoteMetrics> {
+  const quotes = await prisma.quote.findMany({
+    where: { customerId, estimateAt: { gte: range.start, lte: range.end } },
+  });
+
+  const byStatus: Record<string, number> = {};
+  let totalValue = 0;
+  let totalDiscount = 0;
+  let convertedCount = 0;
+  let convertedValue = 0;
+
+  for (const q of quotes) {
+    byStatus[q.status] = (byStatus[q.status] ?? 0) + 1;
+    totalValue += Number(q.value);
+    totalDiscount += Number(q.discount);
+    if (q.isConverted) {
+      convertedCount += 1;
+      convertedValue += Number(q.value);
+    }
+  }
+
+  const total = quotes.length;
+  return {
+    total,
+    totalValue,
+    totalDiscount,
+    convertedCount,
+    convertedValue,
+    conversionRate: total ? convertedCount / total : 0,
+    avgQuoteValue: total ? totalValue / total : 0,
+    byStatus,
   };
 }
 
@@ -129,21 +247,99 @@ export async function computePaymentMetrics(customerId: string, range: DateRange
   });
 
   let totalAmount = 0;
-  let zuperPayAmount = 0;
+  let onlineAmount = 0;
+  let offlineAmount = 0;
+  const byMode: Record<string, number> = {};
+
   for (const p of payments) {
-    totalAmount += Number(p.amount);
-    if (p.zuperPayUsed) zuperPayAmount += Number(p.amount);
+    const amount = Number(p.amount);
+    totalAmount += amount;
+    if (p.paymentModeType === "ONLINE") onlineAmount += amount;
+    else offlineAmount += amount;
+    const modeLabel = p.paymentModeName ?? "Unknown";
+    byMode[modeLabel] = (byMode[modeLabel] ?? 0) + amount;
   }
 
+  const onlineShare = totalAmount ? onlineAmount / totalAmount : 0;
   return {
     total: payments.length,
     totalAmount,
-    zuperPayAmount,
-    zuperPayShare: totalAmount ? zuperPayAmount / totalAmount : 0,
+    onlineAmount,
+    offlineAmount,
+    onlineShare,
+    zuperPayShare: onlineShare,
+    byMode,
   };
 }
 
-/** Recomputes per-technician job rollups from the Job table for a period. Called after jobs+technicians sync. */
+/** Inventory is a current snapshot, not period-scoped — every sync overwrites the catalog. */
+export async function computeInventoryMetrics(customerId: string): Promise<InventoryMetrics> {
+  const products = await prisma.product.findMany({ where: { customerId } });
+
+  let totalValue = 0;
+  let totalPurchaseValue = 0;
+  let lowStockCount = 0;
+
+  for (const p of products) {
+    const qty = Number(p.quantity);
+    if (qty > 0) {
+      totalValue += qty * Number(p.price);
+      totalPurchaseValue += qty * Number(p.purchasePrice);
+    }
+    if (p.lowStock) lowStockCount += 1;
+  }
+
+  return { totalItems: products.length, totalValue, totalPurchaseValue, lowStockCount };
+}
+
+export async function computeExpenseMetrics(customerId: string, range: DateRange): Promise<ExpenseMetrics> {
+  const expenses = await prisma.expense.findMany({
+    where: { customerId, incurredAt: { gte: range.start, lte: range.end } },
+  });
+
+  let totalAmount = 0;
+  let billableAmount = 0;
+  for (const e of expenses) {
+    const amount = Number(e.amount);
+    totalAmount += amount;
+    if (e.isBillable) billableAmount += amount;
+  }
+
+  return { total: expenses.length, totalAmount, billableAmount };
+}
+
+/** Zuper's own end-customer ledger (LTV/receivables/credits) — a current snapshot, not period-scoped. */
+export async function computeLedgerMetrics(customerId: string): Promise<LedgerMetrics> {
+  const endCustomers = await prisma.endCustomerLedger.findMany({ where: { customerId } });
+
+  let totalLtv = 0;
+  let totalReceivables = 0;
+  let totalCredits = 0;
+  let activeCustomerCount = 0;
+
+  for (const c of endCustomers) {
+    totalLtv += Number(c.ltv);
+    totalReceivables += Number(c.receivables);
+    totalCredits += Number(c.credits);
+    if (c.isActive) activeCustomerCount += 1;
+  }
+
+  const topByLtv = [...endCustomers]
+    .sort((a, b) => Number(b.ltv) - Number(a.ltv))
+    .slice(0, 5)
+    .map((c) => ({ name: c.name, ltv: Number(c.ltv), receivables: Number(c.receivables) }));
+
+  return {
+    customerCount: endCustomers.length,
+    activeCustomerCount,
+    totalLtv,
+    totalReceivables,
+    totalCredits,
+    topByLtv,
+  };
+}
+
+/** Recomputes per-technician job rollups from the Job table for a period. Called after jobs+teams sync. */
 export async function computeTechnicianRollups(customerId: string, range: DateRange): Promise<void> {
   const [jobs, technicians] = await Promise.all([
     prisma.job.findMany({ where: { customerId, createdAt: { gte: range.start, lte: range.end } } }),
@@ -179,26 +375,80 @@ export async function computeTechnicianRollups(customerId: string, range: DateRa
   );
 }
 
+/** Pairs CHECK_IN/CHECK_OUT TimesheetEvent rows chronologically per technician and sums the
+ * resulting durations into Technician.hoursWorked for the period. Called after timesheets+teams sync. */
+export async function computeTimesheetHours(customerId: string, range: DateRange): Promise<void> {
+  const [events, technicians] = await Promise.all([
+    prisma.timesheetEvent.findMany({
+      where: { customerId, checkedAt: { gte: range.start, lte: range.end } },
+      orderBy: { checkedAt: "asc" },
+    }),
+    prisma.technician.findMany({ where: { customerId, periodStart: range.start, periodEnd: range.end } }),
+  ]);
+
+  const byUser = new Map<string, typeof events>();
+  for (const e of events) {
+    const list = byUser.get(e.zuperUserId) ?? [];
+    list.push(e);
+    byUser.set(e.zuperUserId, list);
+  }
+
+  const hoursByUser = new Map<string, number>();
+  for (const [userId, userEvents] of byUser) {
+    let totalMs = 0;
+    let openCheckIn: Date | null = null;
+    for (const event of userEvents) {
+      if (event.typeOfCheck === "CHECK_IN") {
+        openCheckIn = event.checkedAt;
+      } else if (event.typeOfCheck === "CHECK_OUT" && openCheckIn) {
+        totalMs += event.checkedAt.getTime() - openCheckIn.getTime();
+        openCheckIn = null;
+      }
+    }
+    hoursByUser.set(userId, totalMs / (1000 * 60 * 60));
+  }
+
+  await Promise.all(
+    technicians.map((tech) => {
+      const hours = hoursByUser.get(tech.zuperUserId);
+      if (hours == null) return null;
+      return prisma.technician.update({ where: { id: tech.id }, data: { hoursWorked: hours } });
+    })
+  );
+}
+
 export async function computeTechnicianRankings(customerId: string, range: DateRange): Promise<TechnicianRanking[]> {
   const technicians = await prisma.technician.findMany({
     where: { customerId, periodStart: range.start, periodEnd: range.end },
     orderBy: { jobsCompleted: "desc" },
   });
 
-  return technicians.map((t) => ({
-    name: t.name,
-    jobsCompleted: t.jobsCompleted,
-    completionRate: Number(t.completionRate),
-    revenue: Number(t.revenue),
-    avgJobValue: Number(t.avgJobValue),
-  }));
+  return technicians.map((t) => {
+    const hourlyRate = t.hourlyRate != null ? Number(t.hourlyRate) : null;
+    const hoursWorked = Number(t.hoursWorked);
+    return {
+      name: t.name,
+      designation: t.designation,
+      jobsCompleted: t.jobsCompleted,
+      completionRate: Number(t.completionRate),
+      revenue: Number(t.revenue),
+      avgJobValue: Number(t.avgJobValue),
+      hourlyRate,
+      hoursWorked,
+      laborCost: hourlyRate != null ? hourlyRate * hoursWorked : null,
+    };
+  });
 }
 
 export async function computePeriodMetrics(customerId: string, range: DateRange): Promise<PeriodMetrics> {
-  const [jobs, invoices, payments, technicianRankings] = await Promise.all([
+  const [jobs, invoices, quotes, payments, inventory, expenses, ledger, technicianRankings] = await Promise.all([
     computeJobMetrics(customerId, range),
     computeInvoiceMetrics(customerId, range),
+    computeQuoteMetrics(customerId, range),
     computePaymentMetrics(customerId, range),
+    computeInventoryMetrics(customerId),
+    computeExpenseMetrics(customerId, range),
+    computeLedgerMetrics(customerId),
     computeTechnicianRankings(customerId, range),
   ]);
 
@@ -210,7 +460,11 @@ export async function computePeriodMetrics(customerId: string, range: DateRange)
     periodEnd: range.end.toISOString(),
     jobs,
     invoices,
+    quotes,
     payments,
+    inventory,
+    expenses,
+    ledger,
     technicianRankings,
     top3TechShareOfJobs,
   };
@@ -230,6 +484,8 @@ export interface ComparisonResult {
     invoicesTotal: number | null;
     revenue: number | null;
     avgInvoiceValue: number | null;
+    quotesValue: number | null;
+    quotesConversionRate: number | null;
   };
 }
 
@@ -254,6 +510,8 @@ export async function computeComparison(customerId: string, range: DateRange): P
       invoicesTotal: pctChange(current.invoices.total, previous.invoices.total),
       revenue: pctChange(current.invoices.totalPaid, previous.invoices.totalPaid),
       avgInvoiceValue: pctChange(current.invoices.avgInvoiceValue, previous.invoices.avgInvoiceValue),
+      quotesValue: pctChange(current.quotes.totalValue, previous.quotes.totalValue),
+      quotesConversionRate: pctChange(current.quotes.conversionRate, previous.quotes.conversionRate),
     },
   };
 }
@@ -300,7 +558,23 @@ export function evaluateRules(metrics: PeriodMetrics, comparison?: ComparisonRes
     matches.push({
       key: "zuper_pay_opportunity",
       severity: "high",
-      detail: `$${metrics.payments.totalAmount.toFixed(0)} in payments processed this period with only ${(metrics.payments.zuperPayShare * 100).toFixed(0)}% via Zuper Pay.`,
+      detail: `$${metrics.payments.totalAmount.toFixed(0)} in payments processed this period with only ${(metrics.payments.zuperPayShare * 100).toFixed(0)}% collected digitally.`,
+    });
+  }
+
+  if (metrics.quotes.total >= 5 && metrics.quotes.conversionRate < 0.3) {
+    matches.push({
+      key: "quote_conversion_low",
+      severity: "medium",
+      detail: `Only ${(metrics.quotes.conversionRate * 100).toFixed(0)}% of ${metrics.quotes.total} quotes sent this period converted.`,
+    });
+  }
+
+  if (metrics.inventory.lowStockCount > 0) {
+    matches.push({
+      key: "inventory_low_stock",
+      severity: "low",
+      detail: `${metrics.inventory.lowStockCount} inventory item(s) are at or below their minimum stock level.`,
     });
   }
 

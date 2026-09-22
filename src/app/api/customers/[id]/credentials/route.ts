@@ -2,10 +2,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/db";
 import { encryptSecret, decryptSecret } from "@/lib/crypto";
-import { ZuperClient } from "@/lib/zuper/client";
+import { ZuperClient, discoverZuperBaseUrl } from "@/lib/zuper/client";
 
 const schema = z.object({
   apiKey: z.string().min(1),
+  // Optional manual override; normally the base URL is auto-discovered from
+  // the customer's zuperAccountId (their Zuper company login name).
   baseUrl: z.string().url().optional(),
 });
 
@@ -15,9 +17,26 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   const parsed = schema.safeParse(body);
   if (!parsed.success) return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
 
-  const encryptedApiKey = encryptSecret(parsed.data.apiKey);
-  const baseUrl = parsed.data.baseUrl ?? process.env.ZUPER_API_BASE_URL ?? "https://api.zuperpro.com";
+  const customer = await prisma.customer.findUnique({ where: { id: customerId } });
+  if (!customer) return NextResponse.json({ error: "Customer not found" }, { status: 404 });
 
+  let baseUrl = parsed.data.baseUrl;
+  if (!baseUrl) {
+    try {
+      baseUrl = await discoverZuperBaseUrl(customer.zuperAccountId);
+    } catch (err) {
+      return NextResponse.json(
+        {
+          error: `Could not resolve a Zuper data center for account "${customer.zuperAccountId}": ${
+            err instanceof Error ? err.message : String(err)
+          }. Check the Zuper account ID on this customer matches their Zuper company login name.`,
+        },
+        { status: 400 }
+      );
+    }
+  }
+
+  const encryptedApiKey = encryptSecret(parsed.data.apiKey);
   const credential = await prisma.apiCredential.upsert({
     where: { customerId },
     create: { customerId, encryptedApiKey, baseUrl },

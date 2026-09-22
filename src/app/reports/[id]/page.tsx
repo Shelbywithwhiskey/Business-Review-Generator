@@ -26,6 +26,7 @@ const SECTION_TITLES: Record<string, string> = {
   executive_summary: "Executive Summary",
   jobs_performance: "Jobs Performance",
   invoice_performance: "Invoice Performance",
+  quotes_performance: "Quotes & Proposals",
   technician_performance: "Technician Performance",
   opportunities: "Opportunities",
 };

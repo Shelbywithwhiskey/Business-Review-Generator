@@ -8,7 +8,9 @@ export const maxDuration = 300; // Vercel Fluid Compute allows longer durations;
 const schema = z.object({
   periodStart: z.string(),
   periodEnd: z.string(),
-  modules: z.array(z.enum(["jobs", "invoices", "technicians", "payments"])).optional(),
+  modules: z
+    .array(z.enum(["jobs", "invoices", "quotes", "teams", "payments", "products", "expenses", "timesheets", "endCustomers"]))
+    .optional(),
 });
 
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
