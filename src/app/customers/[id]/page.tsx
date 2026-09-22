@@ -246,6 +246,77 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
                 ))}
               </div>
             )}
+
+            <div className="mt-6 grid gap-6 sm:grid-cols-2">
+              <div>
+                <h3 className="mb-2 text-sm font-medium">Invoices by status</h3>
+                <StatusTable
+                  rows={Object.entries(metrics.current.invoices.byStatusDetail as Record<string, any>).map(
+                    ([status, d]: [string, any]) => ({
+                      label: status,
+                      count: d.count,
+                      right: `$${d.amount.toFixed(0)} · $${d.amountPaid.toFixed(0)} paid`,
+                    })
+                  )}
+                />
+              </div>
+              <div>
+                <h3 className="mb-2 text-sm font-medium">Jobs by status</h3>
+                <StatusTable
+                  rows={Object.entries(metrics.current.jobs.byStatusDetail as Record<string, any>)
+                    .sort((a: any, b: any) => b[1].count - a[1].count)
+                    .map(([status, d]: [string, any]) => ({
+                      label: status,
+                      count: d.count,
+                      right: `$${d.value.toFixed(0)}`,
+                    }))}
+                />
+              </div>
+            </div>
+
+            <div className="mt-6 rounded-md border border-indigo-200 bg-indigo-50 p-4 text-sm dark:border-indigo-900 dark:bg-indigo-950">
+              <h3 className="mb-2 font-medium text-indigo-900 dark:text-indigo-200">Key insights for this QBR</h3>
+              <ul className="space-y-1 text-indigo-800 dark:text-indigo-300">
+                {metrics.current.insights.powerTechnician && (
+                  <li>
+                    Power performer: <strong>{metrics.current.insights.powerTechnician.name}</strong> — $
+                    {metrics.current.insights.powerTechnician.revenue.toFixed(0)} (
+                    {(metrics.current.insights.powerTechnician.sharePctOfRevenue * 100).toFixed(0)}% of technician
+                    revenue)
+                  </li>
+                )}
+                {metrics.current.insights.topServiceTypeByRevenue && (
+                  <li>
+                    Top service type by revenue: <strong>{metrics.current.insights.topServiceTypeByRevenue.type}</strong> ($
+                    {metrics.current.insights.topServiceTypeByRevenue.revenue.toFixed(0)})
+                  </li>
+                )}
+                {metrics.current.insights.avgDaysToPay != null && (
+                  <li>Average days to collect payment: {metrics.current.insights.avgDaysToPay.toFixed(1)} days</li>
+                )}
+                {metrics.current.insights.avgDaysQuoteToClose != null && (
+                  <li>Average days from quote sent to accepted: {metrics.current.insights.avgDaysQuoteToClose.toFixed(1)} days</li>
+                )}
+                <li>
+                  Repeat customer rate: {(metrics.current.insights.repeatCustomerRate * 100).toFixed(0)}% · Top 5
+                  customers hold {(metrics.current.insights.revenueConcentrationTop5Pct * 100).toFixed(0)}% of account LTV
+                </li>
+                {metrics.current.insights.dormantSeats.length > 0 && (
+                  <li>
+                    Dormant licensed seats: {metrics.current.insights.dormantSeats.map((s: any) => s.name).join(", ")}
+                  </li>
+                )}
+                {metrics.current.insights.highValueCustomersInactiveThisPeriod.length > 0 && (
+                  <li>
+                    High-value customers with no activity this period:{" "}
+                    {metrics.current.insights.highValueCustomersInactiveThisPeriod
+                      .map((c: any) => `${c.name} ($${c.ltv.toFixed(0)} LTV)`)
+                      .join(", ")}
+                  </li>
+                )}
+              </ul>
+            </div>
+
             <button
               onClick={generateReport}
               disabled={generatingReport}
@@ -265,6 +336,27 @@ function Kpi({ label, value }: { label: string; value: string | number }) {
     <div className="rounded-md border border-neutral-200 p-3 dark:border-neutral-800">
       <div className="text-xs text-neutral-500">{label}</div>
       <div className="text-lg font-semibold">{value}</div>
+    </div>
+  );
+}
+
+function StatusTable({ rows }: { rows: { label: string; count: number; right: string }[] }) {
+  if (rows.length === 0) {
+    return <p className="text-sm text-neutral-400">No data for this period.</p>;
+  }
+  return (
+    <div className="overflow-hidden rounded-md border border-neutral-200 dark:border-neutral-800">
+      <table className="w-full text-sm">
+        <tbody className="divide-y divide-neutral-200 dark:divide-neutral-800">
+          {rows.map((r) => (
+            <tr key={r.label}>
+              <td className="px-3 py-1.5">{r.label}</td>
+              <td className="px-3 py-1.5 text-right text-neutral-500">{r.count}</td>
+              <td className="px-3 py-1.5 text-right text-neutral-500">{r.right}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }

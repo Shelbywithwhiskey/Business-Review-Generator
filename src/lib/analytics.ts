@@ -7,6 +7,11 @@ import type { DateRange } from "@/lib/zuper/modules";
 // only thing the AI engine is ever allowed to see when writing narrative.
 // ---------------------------------------------------------------------------
 
+export interface StatusDetail {
+  count: number;
+  value: number;
+}
+
 export interface JobMetrics {
   total: number;
   completed: number;
@@ -18,6 +23,10 @@ export interface JobMetrics {
   totalJobValue: number;
   avgJobValue: number;
   byServiceType: Record<string, number>;
+  revenueByServiceType: Record<string, number>;
+  /** Granular breakdown by Zuper's actual status label (e.g. "Waiting on Parts",
+   * "Travel Time"), not the coarse completed/cancelled/open/in_progress bucket above. */
+  byStatusDetail: Record<string, StatusDetail>;
 }
 
 export interface AgingBuckets {
@@ -28,12 +37,21 @@ export interface AgingBuckets {
   d90plus: number;
 }
 
+export interface InvoiceStatusDetail {
+  count: number;
+  amount: number;
+  amountPaid: number;
+  outstanding: number;
+}
+
 export interface InvoiceMetrics {
   total: number;
   totalAmount: number;
   totalPaid: number;
   outstanding: number;
   byStatus: Record<string, number>;
+  /** Same statuses as byStatus, but with dollar amounts per status — what was explicitly asked for. */
+  byStatusDetail: Record<string, InvoiceStatusDetail>;
   avgInvoiceValue: number;
   outstandingOver60Days: number;
   aging: AgingBuckets;
@@ -103,6 +121,47 @@ export interface LedgerMetrics {
   topByLtv: LedgerCustomer[];
 }
 
+export interface PowerTechnician {
+  name: string;
+  designation: string | null;
+  revenue: number;
+  sharePctOfRevenue: number;
+}
+
+export interface DormantSeat {
+  name: string;
+  designation: string | null;
+  licenseType: string | null;
+  lastLoginAt: string | null;
+}
+
+export interface AtRiskCustomer {
+  name: string;
+  ltv: number;
+  receivables: number;
+}
+
+/** Cross-cutting, non-obvious signals a CSM wouldn't easily compute by hand from the
+ * Zuper UI — meant to be QBR/EBR talking points, not just raw totals. */
+export interface KeyInsights {
+  /** Highest-revenue technician this period and their share of total completed-job revenue. */
+  powerTechnician: PowerTechnician | null;
+  /** Licensed, active seats that haven't logged in during the period (or ever) — renewal/adoption risk. */
+  dormantSeats: DormantSeat[];
+  /** Share of Zuper's own total account LTV concentrated in the top 5 end customers — concentration risk. */
+  revenueConcentrationTop5Pct: number;
+  /** Share of the tenant's end customers who have placed more than one job, ever. */
+  repeatCustomerRate: number;
+  /** Average days between invoice issue and payment, for invoices paid this period. */
+  avgDaysToPay: number | null;
+  /** Average days between a quote being sent and accepted, for quotes converted this period. */
+  avgDaysQuoteToClose: number | null;
+  /** Service type with the highest total job revenue this period (not just job count). */
+  topServiceTypeByRevenue: { type: string; revenue: number } | null;
+  /** Top-LTV end customers (Zuper's all-time ledger) who had zero jobs in this period — dormant high-value accounts. */
+  highValueCustomersInactiveThisPeriod: AtRiskCustomer[];
+}
+
 export interface PeriodMetrics {
   periodStart: string;
   periodEnd: string;
@@ -115,6 +174,7 @@ export interface PeriodMetrics {
   ledger: LedgerMetrics;
   technicianRankings: TechnicianRanking[];
   top3TechShareOfJobs: number;
+  insights: KeyInsights;
 }
 
 export async function computeJobMetrics(customerId: string, range: DateRange): Promise<JobMetrics> {
@@ -123,6 +183,8 @@ export async function computeJobMetrics(customerId: string, range: DateRange): P
   });
 
   const byServiceType: Record<string, number> = {};
+  const revenueByServiceType: Record<string, number> = {};
+  const byStatusDetail: Record<string, StatusDetail> = {};
   let totalJobValue = 0;
   let completed = 0;
   let cancelled = 0;
@@ -131,8 +193,17 @@ export async function computeJobMetrics(customerId: string, range: DateRange): P
 
   for (const job of jobs) {
     const type = job.serviceType ?? "Unspecified";
+    const value = job.jobValue ? Number(job.jobValue) : 0;
     byServiceType[type] = (byServiceType[type] ?? 0) + 1;
-    totalJobValue += job.jobValue ? Number(job.jobValue) : 0;
+    revenueByServiceType[type] = (revenueByServiceType[type] ?? 0) + value;
+    totalJobValue += value;
+
+    const statusLabel = job.rawStatusName ?? job.status;
+    const detail = byStatusDetail[statusLabel] ?? { count: 0, value: 0 };
+    detail.count += 1;
+    detail.value += value;
+    byStatusDetail[statusLabel] = detail;
+
     if (job.status === "completed") completed += 1;
     else if (job.status === "cancelled") cancelled += 1;
     else if (job.status === "in_progress") inProgress += 1;
@@ -151,6 +222,8 @@ export async function computeJobMetrics(customerId: string, range: DateRange): P
     totalJobValue,
     avgJobValue: total ? totalJobValue / total : 0,
     byServiceType,
+    revenueByServiceType,
+    byStatusDetail,
   };
 }
 
@@ -164,6 +237,7 @@ export async function computeInvoiceMetrics(customerId: string, range: DateRange
   });
 
   const byStatus: Record<string, number> = {};
+  const byStatusDetail: Record<string, InvoiceStatusDetail> = {};
   const aging = emptyAging();
   let totalAmount = 0;
   let totalPaid = 0;
@@ -173,10 +247,20 @@ export async function computeInvoiceMetrics(customerId: string, range: DateRange
   const now = Date.now();
 
   for (const inv of invoices) {
+    const amount = Number(inv.amount);
+    const amountPaid = Number(inv.amountPaid);
+    const outstanding = amount - amountPaid;
+
     byStatus[inv.status] = (byStatus[inv.status] ?? 0) + 1;
-    totalAmount += Number(inv.amount);
-    totalPaid += Number(inv.amountPaid);
-    const outstanding = Number(inv.amount) - Number(inv.amountPaid);
+    const detail = byStatusDetail[inv.status] ?? { count: 0, amount: 0, amountPaid: 0, outstanding: 0 };
+    detail.count += 1;
+    detail.amount += amount;
+    detail.amountPaid += amountPaid;
+    detail.outstanding += outstanding;
+    byStatusDetail[inv.status] = detail;
+
+    totalAmount += amount;
+    totalPaid += amountPaid;
 
     if (outstanding > 0 && inv.dueAt) {
       const daysPastDue = (now - inv.dueAt.getTime()) / (1000 * 60 * 60 * 24);
@@ -200,6 +284,7 @@ export async function computeInvoiceMetrics(customerId: string, range: DateRange
     totalPaid,
     outstanding: totalAmount - totalPaid,
     byStatus,
+    byStatusDetail,
     avgInvoiceValue: invoices.length ? totalAmount / invoices.length : 0,
     outstandingOver60Days,
     aging,
@@ -440,6 +525,101 @@ export async function computeTechnicianRankings(customerId: string, range: DateR
   });
 }
 
+/** Reuses jobMetrics/technicianRankings/ledger already computed by the caller and adds the
+ * queries needed for cross-cutting signals that aren't otherwise surfaced anywhere. */
+export async function computeKeyInsights(
+  customerId: string,
+  range: DateRange,
+  jobMetrics: JobMetrics,
+  technicianRankings: TechnicianRanking[],
+  ledger: LedgerMetrics
+): Promise<KeyInsights> {
+  const [quotesConvertedThisPeriod, invoicesPaidThisPeriod, periodJobs, technicians, endCustomers] = await Promise.all([
+    prisma.quote.findMany({
+      where: { customerId, isConverted: true, convertedAt: { gte: range.start, lte: range.end }, sentAt: { not: null } },
+      select: { sentAt: true, acceptedAt: true, convertedAt: true },
+    }),
+    prisma.invoice.findMany({
+      where: { customerId, isPaid: true, paidAt: { gte: range.start, lte: range.end } },
+      select: { issuedAt: true, paidAt: true },
+    }),
+    prisma.job.findMany({
+      where: { customerId, createdAt: { gte: range.start, lte: range.end }, endCustomerId: { not: null } },
+      select: { endCustomerId: true },
+    }),
+    prisma.technician.findMany({ where: { customerId, periodStart: range.start, periodEnd: range.end } }),
+    prisma.endCustomerLedger.findMany({ where: { customerId } }),
+  ]);
+
+  // Power technician: highest revenue this period, and their share of all technician revenue.
+  const totalTechRevenue = technicianRankings.reduce((sum, t) => sum + t.revenue, 0);
+  const topTech = [...technicianRankings].sort((a, b) => b.revenue - a.revenue)[0];
+  const powerTechnician: PowerTechnician | null = topTech
+    ? {
+        name: topTech.name,
+        designation: topTech.designation,
+        revenue: topTech.revenue,
+        sharePctOfRevenue: totalTechRevenue ? topTech.revenue / totalTechRevenue : 0,
+      }
+    : null;
+
+  // Dormant seats: active licensed users who haven't logged in within the period window (or ever).
+  const dormantSeats: DormantSeat[] = technicians
+    .filter((t) => t.isActive && (!t.lastLoginAt || t.lastLoginAt < range.start))
+    .map((t) => ({
+      name: t.name,
+      designation: t.designation,
+      licenseType: t.licenseType,
+      lastLoginAt: t.lastLoginAt ? t.lastLoginAt.toISOString() : null,
+    }));
+
+  // Revenue concentration: share of total account LTV held by the top 5 end customers.
+  const sortedByLtv = [...endCustomers].sort((a, b) => Number(b.ltv) - Number(a.ltv));
+  const top5LtvSum = sortedByLtv.slice(0, 5).reduce((sum, c) => sum + Number(c.ltv), 0);
+  const revenueConcentrationTop5Pct = ledger.totalLtv ? top5LtvSum / ledger.totalLtv : 0;
+
+  // Repeat customer rate across the tenant's full end-customer base (all-time, not period-scoped).
+  const repeatCustomerRate = endCustomers.length
+    ? endCustomers.filter((c) => c.noOfJobs > 1).length / endCustomers.length
+    : 0;
+
+  // Avg days to pay, for invoices actually paid this period.
+  const daysToPay = invoicesPaidThisPeriod
+    .filter((i) => i.paidAt)
+    .map((i) => (i.paidAt!.getTime() - i.issuedAt.getTime()) / (1000 * 60 * 60 * 24));
+  const avgDaysToPay = daysToPay.length ? daysToPay.reduce((a, b) => a + b, 0) / daysToPay.length : null;
+
+  // Avg days from quote sent to accepted, for quotes converted this period.
+  const daysToClose = quotesConvertedThisPeriod
+    .filter((q) => q.sentAt && q.acceptedAt)
+    .map((q) => (q.acceptedAt!.getTime() - q.sentAt!.getTime()) / (1000 * 60 * 60 * 24));
+  const avgDaysQuoteToClose = daysToClose.length ? daysToClose.reduce((a, b) => a + b, 0) / daysToClose.length : null;
+
+  // Top service type by revenue (distinct from the count-based byServiceType breakdown).
+  const revenueEntries = Object.entries(jobMetrics.revenueByServiceType).sort((a, b) => b[1] - a[1]);
+  const topServiceTypeByRevenue = revenueEntries.length
+    ? { type: revenueEntries[0][0], revenue: revenueEntries[0][1] }
+    : null;
+
+  // High-value customers (top 10 by all-time LTV) with zero jobs logged in this period.
+  const activeEndCustomerIds = new Set(periodJobs.map((j) => j.endCustomerId).filter((id): id is string => !!id));
+  const highValueCustomersInactiveThisPeriod: AtRiskCustomer[] = sortedByLtv
+    .slice(0, 10)
+    .filter((c) => !activeEndCustomerIds.has(c.zuperCustomerId))
+    .map((c) => ({ name: c.name, ltv: Number(c.ltv), receivables: Number(c.receivables) }));
+
+  return {
+    powerTechnician,
+    dormantSeats,
+    revenueConcentrationTop5Pct,
+    repeatCustomerRate,
+    avgDaysToPay,
+    avgDaysQuoteToClose,
+    topServiceTypeByRevenue,
+    highValueCustomersInactiveThisPeriod,
+  };
+}
+
 export async function computePeriodMetrics(customerId: string, range: DateRange): Promise<PeriodMetrics> {
   const [jobs, invoices, quotes, payments, inventory, expenses, ledger, technicianRankings] = await Promise.all([
     computeJobMetrics(customerId, range),
@@ -455,6 +635,8 @@ export async function computePeriodMetrics(customerId: string, range: DateRange)
   const top3Jobs = technicianRankings.slice(0, 3).reduce((sum, t) => sum + t.jobsCompleted, 0);
   const top3TechShareOfJobs = jobs.completed ? top3Jobs / jobs.completed : 0;
 
+  const insights = await computeKeyInsights(customerId, range, jobs, technicianRankings, ledger);
+
   return {
     periodStart: range.start.toISOString(),
     periodEnd: range.end.toISOString(),
@@ -467,6 +649,7 @@ export async function computePeriodMetrics(customerId: string, range: DateRange)
     ledger,
     technicianRankings,
     top3TechShareOfJobs,
+    insights,
   };
 }
 
@@ -575,6 +758,31 @@ export function evaluateRules(metrics: PeriodMetrics, comparison?: ComparisonRes
       key: "inventory_low_stock",
       severity: "low",
       detail: `${metrics.inventory.lowStockCount} inventory item(s) are at or below their minimum stock level.`,
+    });
+  }
+
+  if (metrics.insights.dormantSeats.length > 0) {
+    matches.push({
+      key: "dormant_licensed_seats",
+      severity: "medium",
+      detail: `${metrics.insights.dormantSeats.length} licensed seat(s) haven't logged in this period: ${metrics.insights.dormantSeats.map((s) => s.name).join(", ")}.`,
+    });
+  }
+
+  if (metrics.insights.highValueCustomersInactiveThisPeriod.length > 0) {
+    const top = metrics.insights.highValueCustomersInactiveThisPeriod[0];
+    matches.push({
+      key: "high_value_customer_churn_risk",
+      severity: "high",
+      detail: `${metrics.insights.highValueCustomersInactiveThisPeriod.length} of the account's top-10 lifetime-value customers had no jobs this period, including ${top.name} ($${top.ltv.toFixed(0)} LTV).`,
+    });
+  }
+
+  if (metrics.insights.revenueConcentrationTop5Pct > 0.5 && metrics.ledger.customerCount > 10) {
+    matches.push({
+      key: "customer_concentration_risk",
+      severity: "medium",
+      detail: `The top 5 customers account for ${(metrics.insights.revenueConcentrationTop5Pct * 100).toFixed(0)}% of the account's total lifetime value.`,
     });
   }
 

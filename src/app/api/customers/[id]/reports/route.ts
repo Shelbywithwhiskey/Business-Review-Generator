@@ -45,6 +45,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     invoice_performance: comparison.current.invoices,
     quotes_performance: comparison.current.quotes,
     technician_performance: comparison.current.technicianRankings,
+    key_insights: comparison.current.insights,
     opportunities: rules,
   };
 
@@ -78,7 +79,13 @@ function sectionAppliesToRule(sectionKey: string, ruleKey: string): boolean {
     invoice_performance: ["invoice_aging_high"],
     quotes_performance: ["quote_conversion_low"],
     technician_performance: ["technician_workload_concentration"],
-    opportunities: ["zuper_pay_opportunity", "inventory_low_stock"],
+    opportunities: [
+      "zuper_pay_opportunity",
+      "inventory_low_stock",
+      "dormant_licensed_seats",
+      "high_value_customer_churn_risk",
+      "customer_concentration_risk",
+    ],
   };
   return map[sectionKey]?.includes(ruleKey) ?? false;
 }

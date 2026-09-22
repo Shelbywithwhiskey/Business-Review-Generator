@@ -28,6 +28,7 @@ const SECTION_TITLES: Record<string, string> = {
   invoice_performance: "Invoice Performance",
   quotes_performance: "Quotes & Proposals",
   technician_performance: "Technician Performance",
+  key_insights: "Key Insights",
   opportunities: "Opportunities",
 };
 
@@ -76,7 +77,13 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
         <Nav />
       </div>
       <main className="mx-auto max-w-3xl px-6 py-10">
-        <div className="no-print mb-6 flex justify-end">
+        <div className="no-print mb-6 flex justify-end gap-2">
+          <a
+            href={`/api/reports/${id}/export/ebr-pptx`}
+            className="rounded-md bg-neutral-900 px-3 py-1.5 text-sm font-medium text-white dark:bg-neutral-100 dark:text-neutral-900"
+          >
+            Download EBR (PPTX)
+          </a>
           <button
             onClick={() => window.print()}
             className="rounded-md border border-neutral-300 px-3 py-1.5 text-sm dark:border-neutral-700"

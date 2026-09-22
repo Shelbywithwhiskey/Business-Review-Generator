@@ -8,6 +8,7 @@ import type {
   InvoiceMetrics,
   QuoteMetrics,
   TechnicianRanking,
+  KeyInsights,
 } from "@/lib/analytics";
 
 const SYSTEM_PROMPT = `You are writing content for a Zuper customer business review (QBR/MBR).
@@ -66,7 +67,7 @@ async function generate(
 // ---------------------------------------------------------------------------
 
 const pct = (n: number) => `${(n * 100).toFixed(1)}%`;
-const money = (n: number) => `$${n.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+const money = (n: number) => `$${n.toLocaleString("en-US", { maximumFractionDigits: 0 })}`;
 
 function templateExecutiveSummary(
   metrics: PeriodMetrics,
@@ -110,6 +111,43 @@ function templateOpportunitiesNarrative(rules: RuleMatch[]): string {
   return `${rules.length} item(s) were flagged for review this period: ${rules.map((r) => r.detail).join(" ")}`;
 }
 
+function templateKeyInsightsNarrative(insights: KeyInsights): string {
+  const parts: string[] = [];
+
+  if (insights.powerTechnician) {
+    const t = insights.powerTechnician;
+    parts.push(
+      `${t.name} was the account's top performer this period, generating ${money(t.revenue)} (${pct(t.sharePctOfRevenue)} of total technician revenue).`
+    );
+  }
+  if (insights.topServiceTypeByRevenue) {
+    parts.push(
+      `${insights.topServiceTypeByRevenue.type} was the highest-revenue service type at ${money(insights.topServiceTypeByRevenue.revenue)}.`
+    );
+  }
+  if (insights.avgDaysToPay != null) {
+    parts.push(`Invoices paid this period took an average of ${insights.avgDaysToPay.toFixed(1)} days to collect.`);
+  }
+  if (insights.avgDaysQuoteToClose != null) {
+    parts.push(`Converted quotes closed in an average of ${insights.avgDaysQuoteToClose.toFixed(1)} days from being sent.`);
+  }
+  parts.push(
+    `${pct(insights.repeatCustomerRate)} of the account's customers have placed more than one job, and the top 5 customers represent ${pct(insights.revenueConcentrationTop5Pct)} of total account lifetime value.`
+  );
+  if (insights.dormantSeats.length > 0) {
+    parts.push(
+      `${insights.dormantSeats.length} licensed seat(s) show no login activity this period: ${insights.dormantSeats.map((s) => s.name).join(", ")}.`
+    );
+  }
+  if (insights.highValueCustomersInactiveThisPeriod.length > 0) {
+    parts.push(
+      `${insights.highValueCustomersInactiveThisPeriod.length} of the top 10 lifetime-value customers had no jobs this period: ${insights.highValueCustomersInactiveThisPeriod.map((c) => c.name).join(", ")}.`
+    );
+  }
+
+  return parts.length ? parts.join(" ") : "No standout patterns were detected in this period's data.";
+}
+
 const RECOMMENDATION_TEMPLATES: Record<string, (rule: RuleMatch) => string> = {
   cancellation_rate_increase: (r) =>
     `Recommendation: ${r.detail} Review cancellation reasons and whether scheduling capacity or technician assignment is contributing.`,
@@ -122,6 +160,12 @@ const RECOMMENDATION_TEMPLATES: Record<string, (rule: RuleMatch) => string> = {
     `Recommendation: ${r.detail} Review quote follow-up cadence and pricing competitiveness for quotes that stalled or expired.`,
   inventory_low_stock: (r) =>
     `Recommendation: ${r.detail} Reorder affected parts to avoid job delays from stockouts.`,
+  dormant_licensed_seats: (r) =>
+    `Recommendation: ${r.detail} Confirm these seats are still needed at renewal, or schedule a refresher training to drive adoption.`,
+  high_value_customer_churn_risk: (r) =>
+    `Recommendation: ${r.detail} Proactively reach out to these accounts before renewal to confirm satisfaction and re-engage.`,
+  customer_concentration_risk: (r) =>
+    `Recommendation: ${r.detail} Diversifying the customer base would reduce exposure if any single top account churns.`,
 };
 
 function templateRecommendation(rule: RuleMatch): string {
@@ -159,15 +203,17 @@ export async function generateSectionNarrative(sectionKey: string, sectionMetric
         return templateTechnicianNarrative(sectionMetrics as TechnicianRanking[]);
       case "opportunities":
         return templateOpportunitiesNarrative(sectionMetrics as RuleMatch[]);
+      case "key_insights":
+        return templateKeyInsightsNarrative(sectionMetrics as KeyInsights);
       default:
         return "No narrative available for this section.";
     }
   };
-  return generate(
-    `Write one short narrative paragraph (2-4 sentences) for the "${sectionKey}" section of this report.`,
-    sectionMetrics,
-    fallback
-  );
+  const instruction =
+    sectionKey === "key_insights"
+      ? `Write 4-6 sentences of standout, non-obvious talking points a CSM could raise in a live QBR/EBR meeting — things a customer wouldn't already know from their own dashboard (who the top performer is, payment/quote velocity, customer concentration, dormant seats, at-risk high-value accounts). Skip anything not present in the JSON.`
+      : `Write one short narrative paragraph (2-4 sentences) for the "${sectionKey}" section of this report.`;
+  return generate(instruction, sectionMetrics, fallback, sectionKey === "key_insights" ? 600 : 400);
 }
 
 export async function generateRecommendation(sectionKey: string, rule: RuleMatch): Promise<string> {

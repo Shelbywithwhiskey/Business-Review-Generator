@@ -10,9 +10,11 @@ export interface DateRange {
 export interface NormalizedJob {
   zuperJobId: string;
   status: string;
+  rawStatusName: string | null;
   serviceType: string | null;
   location: string | null;
   technicianId: string | null;
+  endCustomerId: string | null;
   jobValue: number | null;
   createdAt: Date;
   completedAt: Date | null;
@@ -53,6 +55,8 @@ export interface NormalizedTechnician {
   designation: string | null;
   hourlyRate: number | null;
   isActive: boolean;
+  licenseType: string | null;
+  lastLoginAt: Date | null;
 }
 
 export interface NormalizedPayment {
@@ -148,9 +152,11 @@ function normalizeJob(raw: Record<string, any>): NormalizedJob {
   return {
     zuperJobId: String(raw.job_uid),
     status,
+    rawStatusName: raw.current_job_status?.status_name ?? null,
     serviceType: raw.job_category?.category_name ?? null,
     location: raw.customer_address?.city ?? null,
     technicianId: primaryAssignee?.user?.user_uid ?? null,
+    endCustomerId: raw.customer?.customer_uid ?? null,
     jobValue: raw.job_total != null ? Number(raw.job_total) : null,
     createdAt: new Date(raw.created_at),
     completedAt: completedHistoryEntry ? new Date(completedHistoryEntry.created_at) : null,
@@ -238,6 +244,8 @@ function normalizeTechnician(raw: Record<string, any>): NormalizedTechnician {
     designation: raw.designation ?? raw.role?.role_name ?? null,
     hourlyRate: raw.hourly_labor_charge != null ? Number(raw.hourly_labor_charge) : null,
     isActive: raw.is_active !== false,
+    licenseType: raw.license_type ?? null,
+    lastLoginAt: raw.last_login_at ? new Date(raw.last_login_at) : null,
   };
 }
 

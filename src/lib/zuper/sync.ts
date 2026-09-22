@@ -112,6 +112,8 @@ export async function runSync(
                 designation: tech.designation,
                 hourlyRate: tech.hourlyRate,
                 isActive: tech.isActive,
+                licenseType: tech.licenseType,
+                lastLoginAt: tech.lastLoginAt,
                 syncRunId: syncRun.id,
               },
             })

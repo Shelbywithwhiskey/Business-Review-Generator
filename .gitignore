@@ -42,3 +42,6 @@ next-env.d.ts
 
 .vercel
 .env*
+
+# throwaway local probes/test scripts — may reference real customer data, never commit
+.scratch-*
