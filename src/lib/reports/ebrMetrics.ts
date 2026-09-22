@@ -170,6 +170,46 @@ export async function computeTopJobCategories(
     .map(([name, count]) => ({ name, count, pct: total ? count / total : 0 }));
 }
 
+/** Every job category in the period, ranked by volume (topN omitted). */
+export async function computeAllJobCategories(customerId: string, range: DateRange): Promise<JobCategoryShare[]> {
+  return computeTopJobCategories(customerId, range, Infinity);
+}
+
+export interface WorkflowRow {
+  name: string;
+  isActive: boolean;
+  lastExecutionTime: Date | null;
+}
+
+export interface WorkflowSummary {
+  total: number;
+  active: number;
+  inactive: number;
+  /** Sorted by lastExecutionTime desc (never-run workflows last). Run counts/success rates aren't exposed by the Workflow Builder API — confirmed by testing /workflows/{id}/runs, /executions, /history (all 404). */
+  workflows: WorkflowRow[];
+}
+
+export async function computeWorkflowSummary(customerId: string): Promise<WorkflowSummary> {
+  const rows = await prisma.workflow.findMany({
+    where: { customerId },
+    select: { name: true, isActive: true, lastExecutionTime: true },
+  });
+
+  const workflows = [...rows].sort((a, b) => {
+    if (!a.lastExecutionTime && !b.lastExecutionTime) return 0;
+    if (!a.lastExecutionTime) return 1;
+    if (!b.lastExecutionTime) return -1;
+    return b.lastExecutionTime.getTime() - a.lastExecutionTime.getTime();
+  });
+
+  return {
+    total: rows.length,
+    active: rows.filter((w) => w.isActive).length,
+    inactive: rows.filter((w) => !w.isActive).length,
+    workflows,
+  };
+}
+
 export interface FootprintComparison {
   currentJobs: number;
   priorJobs: number;

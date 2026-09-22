@@ -29,6 +29,7 @@ model Customer {
   expenses          Expense[]
   timesheetEvents   TimesheetEvent[]
   endCustomers      EndCustomerLedger[]
+  workflows         Workflow[]
   metricSnapshots   MetricSnapshot[]
   healthScores      HealthScore[]
   opportunities     OpportunitySignal[]
@@ -36,14 +37,38 @@ model Customer {
 }
 
 model ApiCredential {
-  id              String    @id @default(cuid())
-  customerId      String    @unique
-  customer        Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
-  encryptedApiKey String // AES-256-GCM ciphertext, base64 ("iv:tag:ciphertext")
-  baseUrl         String    @default("https://api.zuperpro.com")
-  lastVerifiedAt  DateTime?
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
+  id               String    @id @default(cuid())
+  customerId       String    @unique
+  customer         Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  encryptedApiKey  String // AES-256-GCM ciphertext, base64 ("iv:tag:ciphertext")
+  baseUrl          String    @default("https://api.zuperpro.com")
+  // Workflow Builder lives on a separate host (dc_workflow_builder_url from the
+  // accounts.zuperpro.com/api/config discovery response) — not derivable from baseUrl.
+  workflowBaseUrl  String?
+  lastVerifiedAt   DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+}
+
+// Workflow Builder definitions. The API only exposes definitions (name, active
+// status, last_execution_time) — no run counts or success rates, confirmed by
+// testing /workflows/{uid}/runs, /executions, /history (all 404) against a real
+// account with 5 workflows.
+model Workflow {
+  id                 String    @id @default(cuid())
+  customerId         String
+  customer           Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  zuperWorkflowId     String
+  name               String
+  description        String?
+  isActive           Boolean   @default(true)
+  isAiGenerated      Boolean   @default(false)
+  lastExecutionTime  DateTime?
+  createdAt          DateTime
+  updatedAt          DateTime
+  syncRunId          String
+
+  @@unique([customerId, zuperWorkflowId])
 }
 
 enum SyncStatus {

@@ -23,8 +23,14 @@ export class ZuperApiError extends Error {
   }
 }
 
-/** Resolves a company's Zuper login name to its real data-center API base URL (e.g. https://us-east-1.zuperpro.com/api). */
-export async function discoverZuperBaseUrl(companyName: string): Promise<string> {
+export interface ZuperDiscoveredConfig {
+  apiBaseUrl: string;
+  /** Workflow Builder lives on its own host (dc_workflow_builder_url) — not derivable from apiBaseUrl. Absent if the account has no Workflow Builder access. */
+  workflowBaseUrl: string | null;
+}
+
+/** Resolves a company's Zuper login name to its real data-center API base URL (e.g. https://us-east-1.zuperpro.com/api) and, separately, its Workflow Builder host. */
+export async function discoverZuperConfig(companyName: string): Promise<ZuperDiscoveredConfig> {
   const res = await fetch("https://accounts.zuperpro.com/api/config", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -33,12 +39,23 @@ export async function discoverZuperBaseUrl(companyName: string): Promise<string>
   if (!res.ok) {
     throw new ZuperApiError(`Could not resolve Zuper data center for "${companyName}"`, res.status);
   }
-  const body = (await res.json()) as { config?: { dc_api_url?: string } };
+  const body = (await res.json()) as {
+    config?: { dc_api_url?: string; dc_workflow_builder_url?: string };
+  };
   const dcApiUrl = body.config?.dc_api_url;
   if (!dcApiUrl) {
     throw new ZuperApiError(`Zuper data-center discovery returned no dc_api_url for "${companyName}"`, 502, body);
   }
-  return `${dcApiUrl.replace(/\/$/, "")}/api`;
+  const dcWorkflowUrl = body.config?.dc_workflow_builder_url;
+  return {
+    apiBaseUrl: `${dcApiUrl.replace(/\/$/, "")}/api`,
+    workflowBaseUrl: dcWorkflowUrl ? `${dcWorkflowUrl.replace(/\/$/, "")}/api` : null,
+  };
+}
+
+/** @deprecated use discoverZuperConfig — kept so any other call sites don't break. */
+export async function discoverZuperBaseUrl(companyName: string): Promise<string> {
+  return (await discoverZuperConfig(companyName)).apiBaseUrl;
 }
 
 interface ListEnvelope<T> {
@@ -96,7 +113,8 @@ export class ZuperClient {
   ): AsyncGenerator<T[]> {
     let page = 1;
     while (true) {
-      const res = await this.request<ListEnvelope<T>>(path, { ...baseParams, page, count: pageSize });
+      // Most endpoints read `count`; Workflow Builder reads `limit` instead — send both, harmless either way.
+      const res = await this.request<ListEnvelope<T>>(path, { ...baseParams, page, count: pageSize, limit: pageSize });
       const items = res.data ?? [];
       if (items.length === 0) return;
       yield items;

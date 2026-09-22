@@ -7,13 +7,14 @@ import {
   computeFootprintComparison,
   computeQuarterlySeries,
   computeMonthlySeries,
+  computeWorkflowSummary,
 } from "@/lib/reports/ebrMetrics";
 import { niceAxisMax, type LineChartData } from "./chartData";
 
 // ---------------------------------------------------------------------------
 // Builds the {{TOKEN}} -> display-string map and chart datasets consumed by
 // lib/pptx/ebrExport.ts. Token names here MUST match the ones baked into
-// templates/ebr-template.pptx by scripts/tokenize-ebr-template.mjs — the two
+// templates/ebr-template.pptx by scripts/tokenize-qbr-template.mjs — the two
 // are kept in sync by hand (see that script's comment header) since one is a
 // one-time preprocessing script and the other runs per export.
 // ---------------------------------------------------------------------------
@@ -68,7 +69,7 @@ export async function buildEbrTokenData(
   range: DateRange,
   reportTitle: string
 ): Promise<EbrTokenData> {
-  const [jobs, quotes, invoices, topCategories, footprint, quarters, months] = await Promise.all([
+  const [jobs, quotes, invoices, topCategories, footprint, quarters, months, workflowSummary] = await Promise.all([
     computeJobMetrics(customerId, range),
     computeQuoteBreakdown(customerId, range),
     computeInvoiceBreakdown(customerId, range),
@@ -76,6 +77,7 @@ export async function buildEbrTokenData(
     computeFootprintComparison(customerId, range),
     computeQuarterlySeries(customerId, range, 4),
     computeMonthlySeries(customerId, range, 13),
+    computeWorkflowSummary(customerId),
   ]);
 
   const [cat1, cat2, cat3] = topCategories;
@@ -247,6 +249,14 @@ export async function buildEbrTokenData(
     S25_QUOTE_VALUE_RANGE: `${fmtMoneyM(firstMonth.unacceptedQuoteValue)} → ${fmtMoneyM(lastMonth.unacceptedQuoteValue)}`,
     S25_AVG_INVOICE_LABEL: `Avg Invoice Value ${monthRangeLabel}`,
     S25_QUOTE_VALUE_LABEL: `Unaccepted Quote Value ${monthRangeLabel}`,
+
+    // Platform Performance slide — only fields the API actually exposes are populated
+    // (see ebrMetrics.computeWorkflowSummary comment); API calls/latency/attachments/
+    // runs/success-rate/contracted-users are filled with a literal "N/A" in the template.
+    WF_ACTIVE_OF_TOTAL: `${fmtInt(workflowSummary.active)} of ${fmtInt(workflowSummary.total)}`,
+    WF_JOBS_CREATED: fmtInt(jobs.total),
+    WF_INVOICE_VALUE: fmtMoneyM(invoices.totalValue),
+    WF_ACTIVE_USERS: fmtInt(footprint.activeUserCount),
   };
 
   const acceptedByQuarter = quarters.map((q) => Math.round(q.quotesAcceptedValue / 10_000) / 100);

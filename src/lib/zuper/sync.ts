@@ -11,6 +11,7 @@ import {
   expensesModule,
   timesheetsModule,
   endCustomersModule,
+  workflowsModule,
   type ModuleKey,
   type DateRange,
 } from "./modules";
@@ -26,6 +27,7 @@ export const ALL_MODULES: ModuleKey[] = [
   "expenses",
   "timesheets",
   "endCustomers",
+  "workflows",
 ];
 
 export async function runSync(
@@ -186,6 +188,23 @@ export async function runSync(
               where: { customerId_zuperCustomerId: { customerId, zuperCustomerId: endCustomer.zuperCustomerId } },
               create: { ...endCustomer, customerId, syncRunId: syncRun.id },
               update: { ...endCustomer, syncRunId: syncRun.id },
+            })
+          )
+        );
+      }
+    }
+
+    // Workflow Builder lives on a separate host — skip quietly if it was never
+    // discovered (older credential, or the account has no Workflow Builder access).
+    if (modules.includes("workflows") && credential.workflowBaseUrl) {
+      const workflowClient = new ZuperClient(decryptSecret(credential.encryptedApiKey), credential.workflowBaseUrl);
+      for await (const page of workflowsModule.fetch(workflowClient)) {
+        await Promise.all(
+          page.map((workflow) =>
+            prisma.workflow.upsert({
+              where: { customerId_zuperWorkflowId: { customerId, zuperWorkflowId: workflow.zuperWorkflowId } },
+              create: { ...workflow, customerId, syncRunId: syncRun.id },
+              update: { ...workflow, syncRunId: syncRun.id },
             })
           )
         );

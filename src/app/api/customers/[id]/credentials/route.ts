@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/db";
 import { encryptSecret, decryptSecret } from "@/lib/crypto";
-import { ZuperClient, discoverZuperBaseUrl } from "@/lib/zuper/client";
+import { ZuperClient, discoverZuperConfig } from "@/lib/zuper/client";
 
 const schema = z.object({
   apiKey: z.string().min(1),
@@ -21,9 +21,12 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   if (!customer) return NextResponse.json({ error: "Customer not found" }, { status: 404 });
 
   let baseUrl = parsed.data.baseUrl;
+  let workflowBaseUrl: string | null = null;
   if (!baseUrl) {
     try {
-      baseUrl = await discoverZuperBaseUrl(customer.zuperAccountId);
+      const config = await discoverZuperConfig(customer.zuperAccountId);
+      baseUrl = config.apiBaseUrl;
+      workflowBaseUrl = config.workflowBaseUrl;
     } catch (err) {
       return NextResponse.json(
         {
@@ -39,11 +42,11 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   const encryptedApiKey = encryptSecret(parsed.data.apiKey);
   const credential = await prisma.apiCredential.upsert({
     where: { customerId },
-    create: { customerId, encryptedApiKey, baseUrl },
-    update: { encryptedApiKey, baseUrl },
+    create: { customerId, encryptedApiKey, baseUrl, workflowBaseUrl },
+    update: { encryptedApiKey, baseUrl, workflowBaseUrl },
   });
 
-  return NextResponse.json({ ok: true, baseUrl: credential.baseUrl });
+  return NextResponse.json({ ok: true, baseUrl: credential.baseUrl, workflowBaseUrl: credential.workflowBaseUrl });
 }
 
 export async function GET(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {

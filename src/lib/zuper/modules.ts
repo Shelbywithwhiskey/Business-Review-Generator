@@ -115,6 +115,17 @@ export interface NormalizedEndCustomer {
   tags: string[];
 }
 
+export interface NormalizedWorkflow {
+  zuperWorkflowId: string;
+  name: string;
+  description: string | null;
+  isActive: boolean;
+  isAiGenerated: boolean;
+  lastExecutionTime: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
 // ---- Module adapters ----
 // Endpoint paths and field names below were verified live against two real
 // Zuper accounts (2026-09-22) — see project history. None of the list
@@ -382,6 +393,29 @@ function normalizeEndCustomer(raw: Record<string, any>): NormalizedEndCustomer {
   };
 }
 
+/** Runs against a Workflow Builder client (separate host — see ApiCredential.workflowBaseUrl), not the main API client. */
+export const workflowsModule = {
+  key: "workflows" as const,
+  async *fetch(client: ZuperClient) {
+    for await (const page of client.paginate<Record<string, any>>("workflows")) {
+      yield page.map(normalizeWorkflow);
+    }
+  },
+};
+
+function normalizeWorkflow(raw: Record<string, any>): NormalizedWorkflow {
+  return {
+    zuperWorkflowId: String(raw.workflow_uid),
+    name: raw.workflow_name ?? "Untitled workflow",
+    description: raw.workflow_description || null,
+    isActive: Boolean(raw.is_active),
+    isAiGenerated: Boolean(raw.is_ai_generated),
+    lastExecutionTime: raw.last_execution_time ? new Date(raw.last_execution_time) : null,
+    createdAt: new Date(raw.created_at),
+    updatedAt: new Date(raw.updated_at),
+  };
+}
+
 export const MODULE_REGISTRY = [
   jobsModule,
   invoicesModule,
@@ -393,4 +427,4 @@ export const MODULE_REGISTRY = [
   timesheetsModule,
   endCustomersModule,
 ];
-export type ModuleKey = (typeof MODULE_REGISTRY)[number]["key"];
+export type ModuleKey = (typeof MODULE_REGISTRY)[number]["key"] | "workflows";
