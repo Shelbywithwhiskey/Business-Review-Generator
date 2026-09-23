@@ -93,8 +93,26 @@ function axes(horizontal: boolean, format: string, majorUnit: number | null = nu
   );
 }
 
+/**
+ * Number format for labels/axis. Locked to en-US ([$-409]) so PowerPoint doesn't regroup digits by
+ * the viewer's locale (e.g. "$1,99,662" on en-IN), and large values shortened to K/M by Excel's
+ * scaling commas — the underlying values stay exact.
+ */
+function resolveFormat(spec: ChartSpec): string {
+  const base = spec.numberFormat ?? "#,##0";
+  const max = Math.max(0, ...spec.series.flatMap((s) => s.values.map((v) => Math.abs(v))));
+  if (base.includes("$")) {
+    // Third section = how zero renders ("$0", not "$0.0K").
+    if (max >= 1_000_000) return `[$$-409]#,##0.0,,"M";-[$$-409]#,##0.0,,"M";"$0"`;
+    if (max >= 10_000) return `[$$-409]#,##0.0,"K";-[$$-409]#,##0.0,"K";"$0"`;
+    return `[$$-409]#,##0`;
+  }
+  if (base === "#,##0" && max >= 100_000) return `[$-409]#,##0.0,"K"`;
+  return `[$-409]${base}`;
+}
+
 function plot(spec: ChartSpec): string {
-  const format = spec.numberFormat ?? "#,##0";
+  const format = resolveFormat(spec);
   const show = spec.showValues ?? true;
   const cat = `<c:cat>${strLit(spec.categories)}</c:cat>`;
 

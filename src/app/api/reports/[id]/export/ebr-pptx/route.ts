@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { generateEbrPptx } from "@/lib/pptx/ebrExport";
 
-export const maxDuration = 60;
+// Large accounts (tens of thousands of synced records) need more than a minute to assemble the deck.
+export const maxDuration = 300;
 
 export async function GET(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;

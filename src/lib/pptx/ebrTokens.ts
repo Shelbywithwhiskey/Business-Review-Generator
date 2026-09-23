@@ -11,8 +11,19 @@ import {
   computeRecommendationSignals,
   type WorkflowSummary,
 } from "@/lib/reports/ebrMetrics";
-import { computeExecutionDeepDive, computeSyncInfo, computeAccountActivityDates } from "@/lib/reports/moduleMetrics";
-import { computeCatalogAnalyses, computeJobServiceDelivery } from "@/lib/reports/catalogMetrics";
+import {
+  computeExecutionDeepDive,
+  computeSyncInfo,
+  computeAccountActivityDates,
+  computeJobDeepDive,
+  computeQuoteDeepDive,
+  type ExecutionDeepDive,
+  type JobDeepDive,
+  type QuoteDeepDive,
+  type SyncInfo,
+} from "@/lib/reports/moduleMetrics";
+import { computeCatalogAnalyses, computeJobServiceDelivery, type JobServiceDelivery, type ModuleAnalysis } from "@/lib/reports/catalogMetrics";
+import { momentum, rank, type Callout } from "@/lib/reports/callouts";
 import { generateBusinessRecommendations } from "@/lib/ai";
 import { fetchWebsiteContext } from "@/lib/website";
 import { niceAxisMax, type LineChartData } from "./chartData";
@@ -79,6 +90,30 @@ export interface EbrTokenData {
   fixups: Record<string, RunFix[]>;
   /** Template slide path -> speaker notes. */
   notes: Record<string, SlideNotes>;
+  /** Template slide path -> ranked call-outs (shown on-slide where there's room, and on the Top Call-outs slide). */
+  callouts: Record<string, Callout[]>;
+}
+
+/** Computed once per export and shared by the template tokens and the generated slides. */
+export interface SharedDeckData {
+  catalog: ModuleAnalysis[];
+  delivery: JobServiceDelivery;
+  jobsDeep: JobDeepDive;
+  quotesDeep: QuoteDeepDive;
+  exec: ExecutionDeepDive;
+  sync: SyncInfo;
+}
+
+export async function computeSharedDeckData(customerId: string, range: DateRange): Promise<SharedDeckData> {
+  const [catalog, delivery, jobsDeep, quotesDeep, exec, sync] = await Promise.all([
+    computeCatalogAnalyses(customerId, range),
+    computeJobServiceDelivery(customerId, range),
+    computeJobDeepDive(customerId, range),
+    computeQuoteDeepDive(customerId, range),
+    computeExecutionDeepDive(customerId, range),
+    computeSyncInfo(customerId, range),
+  ]);
+  return { catalog, delivery, jobsDeep, quotesDeep, exec, sync };
 }
 
 export async function buildEbrTokenData(
@@ -86,9 +121,11 @@ export async function buildEbrTokenData(
   customerName: string,
   customerWebsite: string | null,
   range: DateRange,
-  reportTitle: string
+  reportTitle: string,
+  shared: SharedDeckData
 ): Promise<EbrTokenData> {
-  const [jobs, quotes, invoices, payments, topCategories, footprint, quarters, months, workflowSummary, websiteContext, usage, exec, sync, firsts] =
+  const { catalog, delivery, jobsDeep, quotesDeep, exec, sync } = shared;
+  const [jobs, quotes, invoices, payments, topCategories, footprint, quarters, months, workflowSummary, websiteContext, usage, firsts] =
     await Promise.all([
       computeJobMetrics(customerId, range),
       computeQuoteBreakdown(customerId, range),
@@ -101,11 +138,8 @@ export async function buildEbrTokenData(
       computeWorkflowSummary(customerId, range),
       customerWebsite ? fetchWebsiteContext(customerWebsite) : Promise.resolve(null),
       computeLineItemUsage(customerId, range),
-      computeExecutionDeepDive(customerId, range),
-      computeSyncInfo(customerId, range),
       computeAccountActivityDates(customerId),
     ]);
-  const [delivery, catalog] = await Promise.all([computeJobServiceDelivery(customerId, range), computeCatalogAnalyses(customerId, range)]);
   const highlight = (module: string, label: string) =>
     Number(catalog.find((m) => m.key === module)?.highlights.find((h) => h.label.startsWith(label))?.value.replace(/[^\d.]/g, "") || 0);
 
@@ -123,11 +157,12 @@ export async function buildEbrTokenData(
     : "No jobs were created in this period.";
 
   // Open quote value is pipeline to follow up on — never described as revenue (SPEC §14.5).
+  // Kept to one short line: the template's insight row sits right under the cards.
   const q22Insight = invoices.billable
-    ? `Collections stand at ${fmtPctFraction(invoices.collectionRate)} of the ${fmtMoneyCompact(invoices.totalValue)} invoiced this period` +
-      (quotes.open.value > 0 ? `, with ${fmtMoneyCompact(quotes.open.value)} in quotes still open — the biggest pipeline to follow up on.` : ".")
+    ? `${fmtPctFraction(invoices.collectionRate)} of ${fmtMoneyCompact(invoices.totalValue)} invoiced is collected` +
+      (quotes.open.value > 0 ? `; ${fmtMoneyCompact(quotes.open.value)} in quotes awaits a response.` : ".")
     : quotes.open.value > 0
-      ? `No invoices were issued this period; ${fmtMoneyCompact(quotes.open.value)} in quotes is still open.`
+      ? `No invoices this period; ${fmtMoneyCompact(quotes.open.value)} in quotes awaits a response.`
       : "No invoices were issued this period.";
 
   const quarterLabels = quarters.map((q) => q.label);
@@ -166,7 +201,9 @@ export async function buildEbrTokenData(
       (low === high
         ? `Collection rate was ${fmtPctScaled(low.collectionRatePct)} in ${low.label}. `
         : `Collection rate ranged from ${fmtPctScaled(low.collectionRatePct)} in ${low.label} to ${fmtPctScaled(high.collectionRatePct)} in ${high.label}. `) +
-      `Invoiced value moved from ${fmtMoneyCompact(quarters[0].invoicesInvoicedValue)} (${quarters[0].label}) to ${fmtMoneyCompact(lastQuarter.invoicesInvoicedValue)} (${lastQuarter.label}).` +
+      (quartersWithInvoices.length > 1
+        ? `Invoiced value moved from ${fmtMoneyCompact(quartersWithInvoices[0].invoicesInvoicedValue)} (${quartersWithInvoices[0].label}) to ${fmtMoneyCompact(lastQuarter.invoicesInvoicedValue)} (${lastQuarter.label}).`
+        : "") +
       (lastQuarter.label === quarterLabels[quarterLabels.length - 1] && range.end < new Date(Date.UTC(range.end.getUTCFullYear(), Math.floor(range.end.getUTCMonth() / 3) * 3 + 3, 1))
         ? ` ${lastQuarter.label} is still in progress, so its collection rate will rise as invoices are paid.`
         : "");
@@ -174,33 +211,37 @@ export async function buildEbrTokenData(
     s24Insight = "No invoices were issued in the last four quarters.";
   }
 
-  // Trailing-13-month trend: compare the first vs last month with enough invoices for a stable average
-  // (≥5), falling back to any month with invoices.
+  // 13-month trend: the last 3 months vs the 3 before, so one thin month (e.g. the account's first)
+  // can't swing the comparison. Average invoice value only counts months with ≥5 invoices.
   const MIN_INVOICES = 5;
-  const invoiceMonths = months.some((m) => m.invoiceCount >= MIN_INVOICES)
-    ? months.filter((m) => m.invoiceCount >= MIN_INVOICES)
-    : months.filter((m) => m.invoiceCount > 0);
-  const firstInv = invoiceMonths[0];
-  const lastInv = invoiceMonths[invoiceMonths.length - 1];
-  const avgInvoicePctChange = firstInv && lastInv && firstInv !== lastInv && firstInv.avgInvoiceValue
-    ? ((lastInv.avgInvoiceValue - firstInv.avgInvoiceValue) / firstInv.avgInvoiceValue) * 100
-    : null;
   const firstMonth = months[0];
   const lastMonth = months[months.length - 1];
-  const quoteValuePctChange = firstMonth.unacceptedQuoteValue
-    ? ((lastMonth.unacceptedQuoteValue - firstMonth.unacceptedQuoteValue) / firstMonth.unacceptedQuoteValue) * 100
-    : null;
+  const short = (label: string) => label.replace(/-20(\d\d)$/, " $1");
+  const windowAvg = (ms: typeof months) => {
+    const ok = ms.filter((m) => m.invoiceCount >= MIN_INVOICES);
+    const n = ok.reduce((s, m) => s + m.invoiceCount, 0);
+    return ok.length ? ok.reduce((s, m) => s + m.avgInvoiceValue * m.invoiceCount, 0) / n : null;
+  };
+  const recent3 = months.slice(-3);
+  const prior3 = months.slice(-6, -3);
+  const recentAvg = windowAvg(recent3);
+  const priorAvg = windowAvg(prior3);
+  const avgInvoicePctChange = recentAvg != null && priorAvg ? ((recentAvg - priorAvg) / priorAvg) * 100 : null;
+  const quoteTrend = momentum(months.map((m) => ({ label: short(m.label), value: m.unacceptedQuoteValue })), 3, 1);
+  const quoteValuePctChange = quoteTrend?.change != null && quoteTrend.prior > 0 ? quoteTrend.change * 100 : null;
   const acceptedQuoteValue13m = months.reduce((s, m) => s + m.acceptedQuoteValue, 0);
-  const direction = (pct: number | null) => (pct == null ? "changed" : pct >= 0 ? "rose" : "fell");
+  const windowLabel = (ms: typeof months) => `${short(ms[0].label)}–${short(ms[ms.length - 1].label)}`;
   const signed = (pct: number | null) => (pct == null ? "n/a" : `${pct >= 0 ? "+" : "−"}${Math.abs(pct).toFixed(0)}%`);
 
   const s25Insight =
     (avgInvoicePctChange != null
-      ? `Average invoice value ${direction(avgInvoicePctChange)} ${Math.abs(avgInvoicePctChange).toFixed(0)}% ($${fmtInt(firstInv.avgInvoiceValue)} in ${firstInv.label} → $${fmtInt(lastInv.avgInvoiceValue)} in ${lastInv.label})`
-      : "Not enough months with invoices to show an average-invoice trend") +
-    (quoteValuePctChange != null
-      ? `; unaccepted quote value ${direction(quoteValuePctChange)} ${Math.abs(quoteValuePctChange).toFixed(0)}% (${fmtMoneyCompact(firstMonth.unacceptedQuoteValue)} → ${fmtMoneyCompact(lastMonth.unacceptedQuoteValue)}).`
-      : ".");
+      ? `Average invoice value was $${fmtInt(recentAvg!)} in ${windowLabel(recent3)} vs $${fmtInt(priorAvg!)} in ${windowLabel(prior3)} (${signed(avgInvoicePctChange)})`
+      : recentAvg != null
+        ? `Average invoice value was $${fmtInt(recentAvg)} over ${windowLabel(recent3)}`
+        : "Too few invoices per month for a stable average-invoice trend") +
+    // Recent quotes are still being decided, so their "unaccepted" value isn't comparable with older,
+    // decided quotes (SPEC §14.4: don't compare immature cohorts) — state the value, not a % change.
+    (quoteTrend ? `; ${fmtMoneyCompact(quoteTrend.recent)} of quotes from ${windowLabel(recent3)} is not yet accepted — most are still awaiting a decision.` : ".");
 
   const monthRangeLabel = `(${firstMonth.label} → ${lastMonth.label})`;
   const execWindow = exec.available ? `${fmtShortDate(exec.countedFrom!)} – ${fmtShortDate(exec.countedTo!)}` : null;
@@ -254,7 +295,8 @@ export async function buildEbrTokenData(
     FOOTPRINT_PRIOR_INVOICES: fmtInt(footprint.priorInvoices),
     FOOTPRINT_CURRENT_INVOICES: fmtInt(footprint.currentInvoices),
 
-    PERIOD_LABEL_S22: `${periodLabel}  ·  quotes & invoices dated in the period`,
+    // The template's next run is the literal word "Zuper", so this must read into it.
+    PERIOD_LABEL_S22: `${periodLabel}  ·  quotes & invoices recorded in `,
     Q22_QUOTES_TOTAL_VALUE: fmtMoneyCompact(quotes.totalValue),
     Q22_QUOTES_TOTAL_LABEL: `Total Quotes Created  - ${fmtInt(quotes.total)}`,
     Q22_QUOTES_ACCEPTED_LABEL: `${fmtInt(quotes.accepted.count)} Accepted`,
@@ -312,11 +354,11 @@ export async function buildEbrTokenData(
     S25_INSIGHT: s25Insight,
     S25_AVG_INVOICE_DECLINE_PCT: signed(avgInvoicePctChange),
     // Whole-dollar formatting (not millions) — these are per-invoice averages, typically a few thousand dollars.
-    S25_AVG_INVOICE_RANGE: firstInv && lastInv ? `$${fmtInt(firstInv.avgInvoiceValue)} → $${fmtInt(lastInv.avgInvoiceValue)}` : "—",
-    S25_QUOTE_VALUE_DECLINE_PCT: signed(quoteValuePctChange),
-    S25_QUOTE_VALUE_RANGE: `${fmtMoneyCompact(firstMonth.unacceptedQuoteValue)} → ${fmtMoneyCompact(lastMonth.unacceptedQuoteValue)}`,
-    S25_AVG_INVOICE_LABEL: firstInv && lastInv ? `Avg Invoice Value (${firstInv.label} → ${lastInv.label})` : "Avg Invoice Value",
-    S25_QUOTE_VALUE_LABEL: `Unaccepted Quote Value ${monthRangeLabel}`,
+    S25_AVG_INVOICE_RANGE: recentAvg != null && priorAvg != null ? `$${fmtInt(priorAvg)} → $${fmtInt(recentAvg)}` : recentAvg != null ? `$${fmtInt(recentAvg)}` : "—",
+    S25_QUOTE_VALUE_DECLINE_PCT: quoteTrend ? fmtMoneyCompact(quoteTrend.recent) : "—",
+    S25_QUOTE_VALUE_RANGE: quoteTrend ? `${fmtMoneyCompact(quoteTrend.prior)} in the 3 months before` : "—",
+    S25_AVG_INVOICE_LABEL: `Avg invoice, ${windowLabel(prior3)} → ${windowLabel(recent3)}`,
+    S25_QUOTE_VALUE_LABEL: "Recent quotes are still being decided",
 
     // "Live" (active + published), not just is_active — an active draft never runs.
     WF_ACTIVE_OF_TOTAL: `${fmtInt(workflowSummary.live)} of ${fmtInt(workflowSummary.total)}`,
@@ -357,38 +399,119 @@ export async function buildEbrTokenData(
     tokens[`REC${i + 1}_DESC`] = rec.description;
   });
 
+  // null = no activity in that quarter/month: drawn as a gap with no label, not as a misleading 0.
   const toM = (n: number) => Math.round(n / 10_000) / 100;
-  const acceptedByQuarter = quarters.map((q) => toM(q.quotesAcceptedValue));
-  const declinedByQuarter = quarters.map((q) => toM(q.quotesDeclinedValue));
-  const invoicedByQuarter = quarters.map((q) => toM(q.invoicesInvoicedValue));
-  const collectedByQuarter = quarters.map((q) => toM(q.invoicesCollectedValue));
-  const acceptanceRates = quarters.map((q) => Math.round(q.acceptanceRatePct * 10) / 10);
-  const collectionRates = quarters.map((q) => Math.round(q.collectionRatePct * 10) / 10);
+  const hasQuotes = (q: (typeof quarters)[number]) => q.quotesSent > 0;
+  const hasInvoices = (q: (typeof quarters)[number]) => q.invoicesInvoicedValue > 0;
+  const acceptedByQuarter = quarters.map((q) => (hasQuotes(q) ? toM(q.quotesAcceptedValue) : null));
+  const declinedByQuarter = quarters.map((q) => (hasQuotes(q) ? toM(q.quotesDeclinedValue) : null));
+  const invoicedByQuarter = quarters.map((q) => (hasInvoices(q) ? toM(q.invoicesInvoicedValue) : null));
+  const collectedByQuarter = quarters.map((q) => (hasInvoices(q) ? toM(q.invoicesCollectedValue) : null));
+  const acceptanceRates = quarters.map((q) => (hasQuotes(q) ? Math.round(q.acceptanceRatePct * 10) / 10 : null));
+  const collectionRates = quarters.map((q) => (hasInvoices(q) ? Math.round(q.collectionRatePct * 10) / 10 : null));
+  const maxOf = (...xs: (number | null)[]) => Math.max(0, ...xs.filter((x): x is number => x != null));
+  const monthLabels = months.map((m) => short(m.label));
 
   const charts: EbrTokenData["charts"] = {
     chart1: {
       categories: quarterLabels,
       seriesValues: [acceptedByQuarter, declinedByQuarter],
-      axisMax: niceAxisMax(Math.max(...acceptedByQuarter, ...declinedByQuarter, 0.01)),
+      axisMax: niceAxisMax(Math.max(maxOf(...acceptedByQuarter, ...declinedByQuarter), 0.01)),
     },
-    chart2: { categories: quarterLabels, seriesValues: [acceptanceRates], axisMax: niceAxisMax(Math.max(...acceptanceRates, 1)) },
+    chart2: { categories: quarterLabels, seriesValues: [acceptanceRates], axisMax: niceAxisMax(Math.max(maxOf(...acceptanceRates), 1)) },
     chart3: {
       categories: quarterLabels,
       seriesValues: [invoicedByQuarter, collectedByQuarter],
-      axisMax: niceAxisMax(Math.max(...invoicedByQuarter, ...collectedByQuarter, 0.01)),
+      axisMax: niceAxisMax(Math.max(maxOf(...invoicedByQuarter, ...collectedByQuarter), 0.01)),
     },
     chart4: { categories: quarterLabels, seriesValues: [collectionRates], axisMax: 100 },
     chart5: {
-      categories: months.map((m) => m.label),
-      seriesValues: [months.map((m) => Math.round(m.avgInvoiceValue))],
+      categories: monthLabels,
+      seriesValues: [months.map((m) => (m.invoiceCount > 0 ? Math.round(m.avgInvoiceValue) : null))],
       axisMax: niceAxisMax(Math.max(...months.map((m) => m.avgInvoiceValue), 1)),
     },
     chart6: {
-      categories: months.map((m) => m.label),
-      seriesValues: [months.map((m) => toM(m.unacceptedQuoteValue))],
+      categories: monthLabels,
+      seriesValues: [months.map((m) => (m.quoteCount > 0 ? toM(m.unacceptedQuoteValue) : null))],
       axisMax: niceAxisMax(Math.max(...months.map((m) => m.unacceptedQuoteValue / 1_000_000), 0.01)),
     },
   };
+
+  // ---- Call-outs for the template's KPI slides --------------------------------------------------
+  const money = fmtMoneyCompact;
+  const pct0 = (n: number) => `${(n * 100).toFixed(0)}%`;
+  const cats = jobsDeep.categories.filter((c) => !c.name.startsWith("Other"));
+  const bigCat = cats[0];
+  const jobTrend = momentum(jobsDeep.monthly.map((m) => ({ label: m.label, value: m.created })), 3, 30);
+  const businessCallouts = rank([
+    jobTrend?.change != null &&
+      Math.abs(jobTrend.change) >= 0.15 && {
+        tone: jobTrend.change > 0 ? "win" : "risk",
+        headline: `Job volume ${jobTrend.change > 0 ? "up" : "down"} ${pct0(Math.abs(jobTrend.change))} in ${jobTrend.recentLabel}`,
+        detail: `${fmtInt(jobTrend.recent)} jobs created vs ${fmtInt(jobTrend.prior)} in ${jobTrend.priorLabel}${jobTrend.change > 0 ? " — more work flowing through Zuper" : " — worth asking what changed"}.`,
+        score: 55 + Math.min(20, Math.abs(jobTrend.change) * 40),
+        area: "Jobs",
+      },
+    bigCat &&
+      cats.length > 1 &&
+      jobs.total > 0 && {
+        tone: "watch",
+        headline: `${pct0(jobs.completionRate)} of jobs completed — ${bigCat.name} is ${pct0(bigCat.created / jobs.total)} of volume`,
+        detail: cats
+          .slice(0, 3)
+          .map((c) => `${c.name} ${pct0(c.created ? c.completed / c.created : 0)} complete`)
+          .join(", ") + " — read completion by category, not overall.",
+        score: 50,
+        area: "Jobs",
+      },
+    quotes.sent >= 10 && {
+      tone: quotes.accepted.rate < 0.3 ? "risk" : quotes.accepted.rate >= 0.5 ? "win" : "watch",
+      headline: `${pct0(quotes.accepted.rate)} of ${fmtInt(quotes.sent)} sent quotes accepted (${money(quotes.accepted.value)})`,
+      detail:
+        quotesDeep.expiredOpen > 0
+          ? `${fmtInt(quotesDeep.expiredOpen)} quotes expired without a decision and ${money(quotes.open.value)} still awaits a response — follow-up is the lever.`
+          : `${money(quotes.open.value)} still awaits a response.`,
+      score: quotes.accepted.rate < 0.3 ? 72 : quotes.accepted.rate >= 0.5 ? 60 : 45,
+      area: "Quotes",
+    },
+    invoices.billable > 0 && {
+      tone: invoices.collectionRate >= 0.9 ? "win" : invoices.collectionRate < 0.8 ? "risk" : "watch",
+      headline: `${pct0(invoices.collectionRate)} of ${money(invoices.totalValue)} invoiced is collected`,
+      detail:
+        invoices.agedOver60.count > 0
+          ? `${money(invoices.agedOver60.value)} on ${fmtInt(invoices.agedOver60.count)} invoices is 60+ days past due — the collections priority.`
+          : "Nothing from this period is 60+ days past due.",
+      score: invoices.agedOver60.value > 50_000 ? 68 : invoices.collectionRate >= 0.9 ? 55 : 50,
+      area: "Collections",
+    },
+  ] as (Callout | false | null | undefined)[]);
+
+  const worstFlow = [...exec.perWorkflow].sort((a, b) => b.failed - a.failed)[0];
+  const platformCallouts = rank([
+    exec.available &&
+      exec.failed >= 20 &&
+      worstFlow && {
+        tone: "risk",
+        headline: `${fmtInt(exec.failed)} workflow runs failed (${pct0(exec.failureRate)} of runs that executed)`,
+        detail: `"${worstFlow.name}" alone accounts for ${pct0(worstFlow.failed / exec.failed)} of failures${exec.topErrors[0] ? ` ("${exec.topErrors[0].message}")` : ""} — fixing one workflow removes most of the noise.`,
+        score: 70 + Math.min(20, (worstFlow.failed / exec.failed) * 20),
+        area: "Automation",
+      },
+    workflowSummary.live > 0 && {
+      tone: "win",
+      headline: `${fmtInt(workflowSummary.live)} live workflows automate ${fmtInt(workflowSummary.liveSteps)} steps`,
+      detail: `${fmtInt(workflowSummary.webhookTriggered)} are triggered by other systems — Zuper is wired into ${customerName}'s wider stack.`,
+      score: 40,
+      area: "Automation",
+    },
+  ] as (Callout | false | null | undefined)[]);
+
+  const callouts: Record<string, Callout[]> = {
+    "ppt/slides/slide13.xml": businessCallouts,
+    "ppt/slides/slide21.xml": platformCallouts,
+  };
+  // The template's own one-line insight rows get the top call-out where it fits.
+  if (businessCallouts[0]) tokens.JOB_PERFORMANCE_INSIGHT = cats.length > 1 ? businessCallouts.find((c) => c.area === "Jobs")?.detail ?? jobPerformanceInsight : jobPerformanceInsight;
 
   const fixups: Record<string, RunFix[]> = {
     "ppt/slides/slide4.xml": [{ index: 7, expect: "Partnership Journey – (Company Name ) &amp; Zuper", text: `Partnership Journey – ${customerName} & Zuper` }],
@@ -412,13 +535,9 @@ export async function buildEbrTokenData(
     ],
     "ppt/slides/slide19.xml": [
       { index: 0, expect: "Invoice &amp; Quote Value — A Sharp Decline", text: "Invoice & Quote Value — 13-Month Trend" },
-      {
-        index: 6,
-        expect: " (Accepted quote value remained consistent at $1.2M across quarters)",
-        text: ` (Accepted quote value over the same 13 months: ${fmtMoneyCompact(acceptedQuoteValue13m)})`,
-      },
-      { index: 8, expect: "Avg Invoice Value Decline", text: "Avg Invoice Value Change" },
-      { index: 13, expect: "Unaccepted Quote Value Decline", text: "Unaccepted Quote Value Change" },
+      { index: 6, expect: " (Accepted quote value remained consistent at $1.2M across quarters)", text: ` · ${fmtMoneyCompact(acceptedQuoteValue13m)} accepted` },
+      { index: 8, expect: "Avg Invoice Value Decline", text: "Avg Invoice Value, last 3 months" },
+      { index: 13, expect: "Unaccepted Quote Value Decline", text: "Not yet accepted, last 3 months" },
     ],
     "ppt/slides/slide21.xml": [
       { index: 4, expect: "N/A", text: "Not in API" },
@@ -471,5 +590,5 @@ export async function buildEbrTokenData(
     quoteValuePctChange,
   });
 
-  return { tokens, charts, usage, workflowSummary, periodLabel, fixups, notes };
+  return { tokens, charts, usage, workflowSummary, periodLabel, fixups, notes, callouts };
 }

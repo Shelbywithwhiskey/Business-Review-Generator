@@ -86,7 +86,7 @@ export const CATALOG: CatalogModule[] = [
     describe: "Technician routes: jobs per route, distance, time and optimization.",
   },
   { key: "service_tasks", label: "Service tasks", area: "Jobs & scheduling", path: "service_tasks", uidKeys: ["service_task_uid"], describe: "Service tasks attached to jobs and other records." },
-  { key: "notes", label: "Notes", area: "Jobs & scheduling", path: "notes", maxRecords: 3000, uidKeys: ["note_uid"], describe: "Notes logged on jobs, customers and other records." },
+  { key: "notes", label: "Notes", area: "Jobs & scheduling", path: "notes", maxRecords: 15000, uidKeys: ["note_uid"], describe: "Notes logged on jobs, customers and other records." },
   { key: "attachments", label: "Attachments (photos & files)", area: "Jobs & scheduling", path: "attachments/group", countOnly: true, describe: "Photos and files uploaded to records." },
 
   // ---- Customers & portal --------------------------------------------------------------
@@ -141,9 +141,13 @@ export const CATALOG: CatalogModule[] = [
     label: "User time (work, travel, break)",
     area: "Team & time",
     path: "users/timelog",
+    // Returned 400 for both of the first two formats on a live account (2026-09-23); the later
+    // variants are the other formats Zuper uses elsewhere. Failure is recorded on the coverage slide.
     params: (r) => [
       { "filter.from_date": periodDates(r).from, "filter.to_date": periodDates(r).to },
       { "filter.from_date": r.start.toISOString(), "filter.to_date": r.end.toISOString() },
+      { "filter.from_date": `${periodDates(r).from} 00:00:00`, "filter.to_date": `${periodDates(r).to} 23:59:59` },
+      { from_date: periodDates(r).from, to_date: periodDates(r).to },
     ],
     uidKeys: ["user_uid"],
     dateKeys: [],
@@ -162,7 +166,7 @@ export const CATALOG: CatalogModule[] = [
     host: "connect",
     method: "POST",
     body: (_r, page, limit) => ({ filters: {}, page, limit }),
-    maxRecords: 5000,
+    maxRecords: 25000,
     uidKeys: ["call_uid"],
     describe: "Business calls through Zuper Connect, including calls handled by the AI CSR Agent: direction, status and duration.",
   },
@@ -174,7 +178,7 @@ export const CATALOG: CatalogModule[] = [
     host: "connect",
     method: "POST",
     body: (_r, page, limit) => ({ filters: {}, page, limit }),
-    maxRecords: 5000,
+    maxRecords: 15000,
     uidKeys: ["conversation_uid"],
     dateKeys: ["recent_conversation_at", "created_at"],
     describe: "SMS conversations with customers through Zuper Connect.",

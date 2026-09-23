@@ -63,6 +63,14 @@ export interface ModuleAnalysis {
   breakdowns: Breakdown[];
   amount: AmountSummary | null;
   highlights: Highlight[];
+  /** A few record names (for setup summaries). */
+  names: string[];
+  /** Every record shares one status (e.g. all DRAFT) — a sign the area isn't in real use. */
+  singleStatus: { field: string; value: string } | null;
+  /** Records created by a Zuper employee account (created_by email @zuper.co) — onboarding/setup data. */
+  createdByZuper: number;
+  calls?: CallSummary;
+  timelogs?: TimelogSummary;
 }
 
 export function humanize(path: string): string {
@@ -155,6 +163,99 @@ const fmt = (n: number) => Math.round(n).toLocaleString("en-US");
 const money = (n: number) => (Math.abs(n) >= 1e6 ? `$${(n / 1e6).toFixed(2)}M` : Math.abs(n) >= 1e3 ? `$${(n / 1e3).toFixed(1)}K` : `$${Math.round(n).toLocaleString("en-US")}`);
 const pct = (n: number) => `${(n * 100).toFixed(0)}%`;
 
+export interface CallSummary {
+  inPeriod: number;
+  inbound: number;
+  inboundAnswered: number;
+  inboundMissed: number;
+  outbound: number;
+  avgAnswerSec: number | null;
+  avgTalkSec: number | null;
+  recordedShare: number | null;
+  ai: number;
+  monthly: { label: string; count: number }[];
+}
+
+/** Verified against a live Connect account (2026-09-23): direction INCOMING | OUTGOING, status
+ * COMPLETED | FORWARDED | MISSED | CANCELED | VOICEMAIL, call_metric.answered_at / time_to_answer (s),
+ * duration (s), is_recorded. */
+export function summarizeCalls(rows: { data: CompactRecord; at: Date | null }[], range: DateRange): CallSummary {
+  const period = rows.filter((r) => r.at && r.at >= range.start && r.at <= range.end);
+  const isIn = (r: CompactRecord) => /^in|incoming|inbound/i.test(String(r.direction ?? ""));
+  const isOut = (r: CompactRecord) => /^out|outgoing|outbound/i.test(String(r.direction ?? ""));
+  const answered = (r: CompactRecord) => r["call_metric.answered_at"] != null && r["call_metric.answered_at"] !== "";
+  const missedStatus = (r: CompactRecord) => /miss|no.?answer|unanswer|abandon|voicemail/i.test(String(r.status ?? ""));
+  const inbound = period.filter((r) => isIn(r.data));
+  const answeredRows = period.filter((r) => answered(r.data));
+  const answerSecs = answeredRows.map((r) => num(r.data["call_metric.time_to_answer"])).filter((v): v is number => v != null && v >= 0);
+  const talk = answeredRows.map((r) => num(r.data.duration)).filter((v): v is number => v != null && v > 0);
+  const recorded = period.filter((r) => r.data.is_recorded != null);
+  return {
+    inPeriod: period.length,
+    inbound: inbound.length,
+    inboundAnswered: inbound.filter((r) => answered(r.data)).length,
+    inboundMissed: inbound.filter((r) => !answered(r.data) || missedStatus(r.data)).length,
+    outbound: period.filter((r) => isOut(r.data)).length,
+    avgAnswerSec: answerSecs.length ? answerSecs.reduce((s, v) => s + v, 0) / answerSecs.length : null,
+    avgTalkSec: talk.length ? talk.reduce((s, v) => s + v, 0) / talk.length : null,
+    recordedShare: recorded.length ? recorded.filter((r) => truthy(r.data.is_recorded)).length / recorded.length : null,
+    ai: period.filter((r) => Object.entries(r.data).some(([k, v]) => /(^|_|\.)(ai|agent|bot|virtual|csr)(_|\.|$)/i.test(k) && (v === true || v === "true"))).length,
+    monthly: monthsOf(range, period.map((r) => r.at!)),
+  };
+}
+
+export interface TimelogSummary {
+  entries: number;
+  hours: number;
+  longEntries: number;
+  people: { name: string; hours: number; entries: number }[];
+}
+
+/** time_spent is minutes (verified: 4210 = clock_out − clock_in of 70.2 h). Job time logs carry no job id. */
+export function summarizeTimelogs(data: CompactRecord[], range: DateRange): TimelogSummary {
+  const people = new Map<string, { hours: number; entries: number }>();
+  let hours = 0;
+  let entries = 0;
+  let longEntries = 0;
+  for (const r of data) {
+    const a = date(r.clock_in_time);
+    if (!a || a < range.start || a > range.end) continue;
+    const b = date(r.clock_out_time);
+    const spent = num(r.time_spent);
+    const h = spent != null && spent > 0 ? spent / 60 : b && b > a ? (b.getTime() - a.getTime()) / 36e5 : 0;
+    entries += 1;
+    hours += h;
+    if (h > 12) longEntries += 1;
+    const name = `${r["user.first_name"] ?? ""} ${r["user.last_name"] ?? ""}`.trim() || String(r["user.user_uid"] ?? "Unknown");
+    const p = people.get(name) ?? { hours: 0, entries: 0 };
+    p.hours += h;
+    p.entries += 1;
+    people.set(name, p);
+  }
+  return { entries, hours, longEntries, people: [...people.entries()].map(([name, v]) => ({ name, ...v })).sort((x, y) => y.hours - x.hours) };
+}
+
+function detectSingleStatus(rows: CompactRecord[]): { field: string; value: string } | null {
+  if (rows.length < 3) return null;
+  const keys = Object.keys(rows[0]).filter((k) => /status$/i.test(k) && !k.includes("."));
+  for (const k of keys) {
+    const values = new Set(rows.map((r) => r[k]).filter((v) => typeof v === "string" && v));
+    if (values.size === 1 && rows.every((r) => typeof r[k] === "string")) return { field: k, value: String([...values][0]) };
+  }
+  return null;
+}
+
+/** Display names of a module's records (for setup/config summaries). */
+export function recordNames(rows: CompactRecord[], max = 5): string[] {
+  const names: string[] = [];
+  for (const r of rows) {
+    const key = Object.keys(r).find((k) => !k.includes(".") && /(_name|_title|^name|^title)$/i.test(k) && typeof r[k] === "string" && r[k]);
+    if (key) names.push(String(r[key]));
+    if (names.length >= max) break;
+  }
+  return names;
+}
+
 /** Module-specific call-outs on top of the generic breakdowns. Every definition names its field. */
 function moduleHighlights(mod: CatalogModule, rows: { data: CompactRecord; at: Date | null }[], range: DateRange, coverage: CoverageRow): Highlight[] {
   const now = Date.now();
@@ -196,25 +297,11 @@ function moduleHighlights(mod: CatalogModule, rows: { data: CompactRecord; at: D
       break;
     }
     case "job_timelogs": {
-      let ms = 0;
-      const jobs = new Set<string>();
-      const users = new Set<string>();
-      for (const r of rows) {
-        const a = date(r.data.clock_in_time);
-        const b = date(r.data.clock_out_time);
-        if (!a || !b || a < range.start || a > range.end || b <= a) continue;
-        ms += b.getTime() - a.getTime();
-        if (r.data["job.job_uid"]) jobs.add(String(r.data["job.job_uid"]));
-        if (r.data["user.user_uid"]) users.add(String(r.data["user.user_uid"]));
-      }
-      h.push({ label: "Hours logged on jobs", value: fmt(ms / 36e5), definition: "Sum of clock_out_time − clock_in_time for time logs clocked in during the period." });
-      h.push({ label: "Jobs with time logged", value: fmt(jobs.size), definition: "Distinct job.job_uid across those time logs." });
-      h.push({ label: "People logging time", value: fmt(users.size), definition: "Distinct user.user_uid across those time logs." });
-      const earned = sum("amount_earned", (r) => {
-        const a = date(r.clock_in_time);
-        return !!a && a >= range.start && a <= range.end;
-      });
-      if (earned > 0) h.push({ label: "Labor value (amount earned)", value: money(earned), definition: "Sum of Zuper's amount_earned (time × hourly charge) on those time logs." });
+      const t = summarizeTimelogs(data, range);
+      h.push({ label: "Hours logged on jobs", value: fmt(t.hours), definition: "Sum of time_spent (minutes) — or clock_out − clock_in where time_spent is blank — for time logs clocked in during the period." });
+      h.push({ label: "Time log entries", value: fmt(t.entries), definition: "Job time logs clocked in during the period." });
+      h.push({ label: "People logging time", value: fmt(t.people.length), definition: "Distinct user.user_uid across those time logs." });
+      if (t.longEntries) h.push({ label: "Entries over 12 hours", value: fmt(t.longEntries), definition: "Single time logs longer than 12 hours — usually a missed clock-out.", alert: true });
       break;
     }
     case "user_timelogs": {
@@ -229,14 +316,12 @@ function moduleHighlights(mod: CatalogModule, rows: { data: CompactRecord; at: D
       break;
     }
     case "connect_calls": {
-      const missed = count((r) => Object.entries(r).some(([k, v]) => /status/i.test(k) && typeof v === "string" && /miss|no.?answer|unanswer|abandon|voicemail/i.test(v)));
-      const ai = count((r) => Object.entries(r).some(([k, v]) => /(^|_|\.)(ai|agent|bot|virtual|csr)/i.test(k) && (v === true || (typeof v === "string" && v.trim() !== "" && !/false|none|null/i.test(v)))));
-      const inbound = count((r) => Object.entries(r).some(([k, v]) => /direction/i.test(k) && typeof v === "string" && /in/i.test(v)));
-      const periodCalls = rows.filter((r) => r.at && r.at >= range.start && r.at <= range.end).length;
-      h.push({ label: "Calls in the period", value: fmt(periodCalls), definition: "Call records whose created_at falls in the period." });
-      if (inbound) h.push({ label: "Inbound calls", value: fmt(inbound), definition: "Calls whose direction field reads inbound (all synced calls)." });
-      h.push({ label: "Missed / unanswered", value: fmt(missed), definition: "Calls whose status reads missed, no-answer, abandoned or voicemail — the calls CSR Agent is built to catch.", alert: missed > 0 });
-      if (ai) h.push({ label: "Handled by AI / CSR Agent", value: fmt(ai), definition: "Calls carrying an AI/agent/bot flag or agent value." });
+      const c = summarizeCalls(rows, range);
+      h.push({ label: "Calls in the period", value: fmt(c.inPeriod), definition: "Call records whose created_at falls in the period." });
+      if (c.inbound) h.push({ label: "Inbound answer rate", value: pct(c.inboundAnswered / c.inbound), definition: "Incoming calls in the period with an answered time (call_metric.answered_at) ÷ all incoming calls.", alert: c.inboundAnswered / c.inbound < 0.85 });
+      h.push({ label: "Missed / unanswered inbound", value: fmt(c.inboundMissed), definition: "Incoming calls in the period with no answered time, or status MISSED / VOICEMAIL — the calls CSR Agent is built to catch.", alert: c.inboundMissed > 0 });
+      if (c.avgAnswerSec != null) h.push({ label: "Avg time to answer", value: `${c.avgAnswerSec.toFixed(0)} s`, definition: "Mean call_metric.time_to_answer (seconds) across answered calls in the period." });
+      if (c.ai) h.push({ label: "Handled by AI / CSR Agent", value: fmt(c.ai), definition: "Calls carrying an AI/agent/bot flag or agent value." });
       break;
     }
     case "credit_notes": {
@@ -304,6 +389,11 @@ export function analyzeModule(mod: CatalogModule, rows: { data: CompactRecord; a
     breakdowns: detectBreakdowns(rows.map((r) => r.data)),
     amount: detectAmount(rows, range),
     highlights: moduleHighlights(mod, rows, range, cov),
+    names: recordNames(rows.map((r) => r.data)),
+    singleStatus: detectSingleStatus(rows.map((r) => r.data)),
+    createdByZuper: rows.filter((r) => /@zuper\.co$/i.test(String(r.data["created_by.email"] ?? ""))).length,
+    calls: mod.key === "connect_calls" ? summarizeCalls(rows, range) : undefined,
+    timelogs: mod.key === "job_timelogs" ? summarizeTimelogs(rows.map((r) => r.data), range) : undefined,
   };
 }
 
@@ -330,6 +420,8 @@ export interface JobServiceDelivery {
   deadlineField: string | null;
   onTime: { eligible: number; onTime: number; late: number; overdueOpen: number } | null;
   onTimeMonthly: { label: string; onTime: number; late: number }[];
+  /** On-time split by job category — categories behave very differently (a sales job stays open while the deal is worked). */
+  onTimeByCategory: { name: string; eligible: number; onTime: number; late: number; overdueOpen: number; medianDaysLate: number | null }[];
   /** Completed jobs with an invoice linked on the job; null if the job payload has no invoice field. */
   invoicing: { completed: number; invoiced: number; field: string } | null;
   rating: { field: string; average: number; rated: number } | null;
@@ -337,13 +429,7 @@ export interface JobServiceDelivery {
   priorities: { name: string; count: number }[];
   multiTechShare: number | null;
   unscheduledBacklog: number | null;
-  timeOnSite: {
-    hours: number;
-    jobsWithTime: number;
-    avgHoursPerJob: number;
-    byCategory: { name: string; avgHours: number; jobs: number }[];
-    byUser: { name: string; hours: number }[];
-  } | null;
+  timeOnSite: TimelogSummary | null;
 }
 
 export async function computeJobServiceDelivery(customerId: string, range: DateRange): Promise<JobServiceDelivery> {
@@ -352,7 +438,8 @@ export async function computeJobServiceDelivery(customerId: string, range: DateR
       where: { customerId, createdAt: { gte: range.start, lte: range.end } },
       select: { zuperJobId: true, status: true, serviceType: true, priority: true, completedAt: true, scheduledAt: true, extra: true },
     }),
-    prisma.zuperRecord.findMany({ where: { customerId, module: "job_timelogs", recordCreatedAt: { gte: range.start, lte: range.end } }, select: { data: true } }),
+    // Filtered by clock-in date in summarizeTimelogs (created_at is the clock-out time).
+    prisma.zuperRecord.findMany({ where: { customerId, module: "job_timelogs" }, select: { data: true } }),
     prisma.moduleCoverage.findUnique({ where: { customerId_module: { customerId, module: "unscheduled_jobs" } } }),
   ]);
   const extras = jobs.map((j) => (j.extra ?? {}) as CompactRecord);
@@ -362,6 +449,7 @@ export async function computeJobServiceDelivery(customerId: string, range: DateR
   const deadlineField = ["scheduled_end_time", "due_date", "scheduled_end_date"].find(has) ?? null;
   let onTime: JobServiceDelivery["onTime"] = null;
   const monthly = new Map<string, { onTime: number; late: number; sort: number }>();
+  const byCat = new Map<string, { eligible: number; onTime: number; late: number; overdueOpen: number; lateDays: number[] }>();
   if (deadlineField) {
     const now = new Date();
     const o = { eligible: 0, onTime: 0, late: 0, overdueOpen: 0 };
@@ -371,21 +459,30 @@ export async function computeJobServiceDelivery(customerId: string, range: DateR
       const endOfDay = new Date(Date.UTC(deadline.getUTCFullYear(), deadline.getUTCMonth(), deadline.getUTCDate() + 1));
       const key = `${MONTHS[deadline.getUTCMonth()]} ${String(deadline.getUTCFullYear()).slice(2)}`;
       const m = monthly.get(key) ?? { onTime: 0, late: 0, sort: deadline.getUTCFullYear() * 12 + deadline.getUTCMonth() };
+      const cname = j.serviceType ?? "Uncategorized";
+      const c = byCat.get(cname) ?? { eligible: 0, onTime: 0, late: 0, overdueOpen: 0, lateDays: [] };
       if (j.status === "completed" && j.completedAt) {
         o.eligible += 1;
+        c.eligible += 1;
         if (j.completedAt < endOfDay) {
           o.onTime += 1;
           m.onTime += 1;
+          c.onTime += 1;
         } else {
           o.late += 1;
           m.late += 1;
+          c.late += 1;
+          c.lateDays.push((j.completedAt.getTime() - deadline.getTime()) / DAY);
         }
       } else if (endOfDay < now) {
         o.eligible += 1;
         o.overdueOpen += 1;
         m.late += 1;
+        c.eligible += 1;
+        c.overdueOpen += 1;
       }
       monthly.set(key, m);
+      byCat.set(cname, c);
     });
     onTime = o.eligible ? o : null;
   }
@@ -414,41 +511,8 @@ export async function computeJobServiceDelivery(customerId: string, range: DateR
   for (const j of jobs) if (j.priority) pr.set(j.priority, (pr.get(j.priority) ?? 0) + 1);
   const assignedCounts = extras.map((e) => num(e["assigned_to.length"])).filter((v): v is number => v != null);
 
-  let timeOnSite: JobServiceDelivery["timeOnSite"] = null;
-  if (timelogs.length) {
-    const jobCat = new Map(jobs.map((j) => [j.zuperJobId, j.serviceType ?? "Uncategorized"]));
-    const perJob = new Map<string, number>();
-    const perUser = new Map<string, number>();
-    let ms = 0;
-    for (const t of timelogs) {
-      const d = t.data as CompactRecord;
-      const a = date(d.clock_in_time);
-      const b = date(d.clock_out_time);
-      if (!a || !b || b <= a) continue;
-      const dur = b.getTime() - a.getTime();
-      ms += dur;
-      const job = d["job.job_uid"] ? String(d["job.job_uid"]) : null;
-      if (job) perJob.set(job, (perJob.get(job) ?? 0) + dur);
-      const user = String(d["user.first_name"] ?? "") + (d["user.last_name"] ? ` ${d["user.last_name"]}` : "") || String(d["user.user_uid"] ?? "Unknown");
-      perUser.set(user.trim() || "Unknown", (perUser.get(user.trim() || "Unknown") ?? 0) + dur);
-    }
-    const cat = new Map<string, { ms: number; jobs: number }>();
-    for (const [job, dur] of perJob) {
-      const c = jobCat.get(job);
-      if (!c) continue;
-      const e = cat.get(c) ?? { ms: 0, jobs: 0 };
-      e.ms += dur;
-      e.jobs += 1;
-      cat.set(c, e);
-    }
-    timeOnSite = {
-      hours: ms / 36e5,
-      jobsWithTime: perJob.size,
-      avgHoursPerJob: perJob.size ? ms / 36e5 / perJob.size : 0,
-      byCategory: [...cat.entries()].map(([name, v]) => ({ name, avgHours: v.ms / 36e5 / v.jobs, jobs: v.jobs })).filter((c) => c.jobs >= 3).sort((a, b) => b.jobs - a.jobs).slice(0, 8),
-      byUser: [...perUser.entries()].map(([name, v]) => ({ name, hours: v / 36e5 })).sort((a, b) => b.hours - a.hours).slice(0, 10),
-    };
-  }
+  const t = summarizeTimelogs(timelogs.map((x) => x.data as CompactRecord), range);
+  const timeOnSite: JobServiceDelivery["timeOnSite"] = t.entries ? t : null;
 
   return {
     jobsInPeriod: jobs.length,
@@ -456,6 +520,15 @@ export async function computeJobServiceDelivery(customerId: string, range: DateR
     deadlineField,
     onTime,
     onTimeMonthly: [...monthly.entries()].sort((a, b) => a[1].sort - b[1].sort).slice(-12).map(([label, v]) => ({ label, onTime: v.onTime, late: v.late })),
+    onTimeByCategory: [...byCat.entries()]
+      .map(([name, v]) => {
+        const s = [...v.lateDays].sort((a, b) => a - b);
+        const medianDaysLate = s.length ? (s.length % 2 ? s[(s.length - 1) / 2] : (s[s.length / 2 - 1] + s[s.length / 2]) / 2) : null;
+        return { name, eligible: v.eligible, onTime: v.onTime, late: v.late, overdueOpen: v.overdueOpen, medianDaysLate };
+      })
+      .filter((c) => c.eligible > 0)
+      .sort((a, b) => b.eligible - a.eligible)
+      .slice(0, 8),
     invoicing,
     rating,
     jobTypes: typeBreakdowns[0] ?? null,

@@ -132,7 +132,27 @@ export async function insertAutomationSlide(zip: JSZip, s: WorkflowSummary, cust
   );
   drawBarCard(w, CARD_XS[1], "WHAT GETS AUTOMATED", workRows(s), "No live workflows");
   drawWorkflowList(w, CARD_XS[2], s);
-  w.insight(automationInsight(s));
+  const liveNotRun = s.live - s.ranInPeriod;
+  w.keyCallouts(
+    [
+      ...(s.needsAttention > 0
+        ? [{ tone: "risk" as const, headline: `${plural(s.needsAttention, "workflow")} flagged by Workflow Builder as needing attention`, detail: `${s.workflows.filter((x) => x.needsAttention).slice(0, 2).map((x) => `"${truncate(x.name, 30)}"`).join(", ")} — a broken automation quietly pushes work back onto the team.`, score: 62, area: "Automation" }]
+        : []),
+      ...(s.live > 0 && liveNotRun / s.live >= 0.5
+        ? [{ tone: "watch" as const, headline: `${fmtInt(liveNotRun)} of ${fmtInt(s.live)} live workflows didn't run this period`, detail: "their triggers never fired — retire them or check the trigger conditions.", score: 44, area: "Automation" }]
+        : []),
+      ...(s.drafts > 0
+        ? [{ tone: "watch" as const, headline: `${plural(s.drafts, "workflow")} still in draft`, detail: "built but never published — finish or delete.", score: 30, area: "Automation" }]
+        : []),
+      ...(s.total === 0
+        ? [{ tone: "opportunity" as const, headline: "No Workflow Builder automations yet", detail: "status updates, customer emails and hand-offs are still done by hand.", score: 55, area: "Automation" }]
+        : []),
+      ...(s.webhookTriggered > 0
+        ? [{ tone: "win" as const, headline: `${plural(s.webhookTriggered, "workflow")} triggered by other systems`, detail: "Zuper is connected into the wider stack via webhooks.", score: 32, area: "Automation" }]
+        : []),
+    ],
+    automationInsight(s)
+  );
   w.footer('Source: Zuper Workflow Builder definitions (current configuration) · "ran this period" = most recent run falls in the period · run counts on the next slide');
   const topWork = s.categories.find((c) => !PLUMBING_CATEGORIES.includes(c.key));
   w.notes = {

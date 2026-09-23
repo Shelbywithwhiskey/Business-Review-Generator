@@ -1,6 +1,6 @@
 import type JSZip from "jszip";
 import type { LineItemTypeUsage, LineItemUsage } from "@/lib/analytics";
-import { CARD_W, CARD_XS, COLORS, ShapeWriter, fmtInt, fmtMoneyCompact, insertGeneratedSlide, run } from "./generatedSlide";
+import { CARD_W, CARD_XS, COLORS, ShapeWriter, fmtInt, fmtMoneyCompact, insertGeneratedSlide, run, truncate } from "./generatedSlide";
 
 // "Parts, Products & Services Usage" slide — generated per export (not in the
 // template) and spliced in after the last Key Metrics slide.
@@ -39,16 +39,17 @@ function drawCard(w: ShapeWriter, x: number, label: string, emptyNoun: string, u
     return;
   }
 
-  w.text(innerX, CARD_Y + 1460000, innerW, 200000, run("TOP 5 BY JOBS USED", { sz: 800, color: COLORS.faint, bold: true }));
-  const maxJobs = Math.max(...usage.top.map((t) => t.jobCount), 1);
+  w.text(innerX, CARD_Y + 1460000, innerW, 200000, run("TOP 5 BY AMOUNT", { sz: 800, color: COLORS.faint, bold: true }));
+  const maxRevenue = Math.max(...usage.top.map((t) => t.revenue), 1);
   usage.top.forEach((item, i) => {
     w.barRow(
       innerX,
       CARD_Y + 1720000 + i * ROW_STEP,
       innerW,
       item.name,
-      `${fmtInt(item.jobCount)} jobs  ·  ${fmtMoneyCompact(item.revenue)}`,
-      item.jobCount / maxJobs
+      `${fmtMoneyCompact(item.revenue)}  ·  ${fmtInt(item.jobCount)} jobs`,
+      item.revenue / maxRevenue,
+      { labelChars: 22 }
     );
   });
 }
@@ -57,6 +58,10 @@ function drawCard(w: ShapeWriter, x: number, label: string, emptyNoun: string, u
 export function usageInsight(usage: LineItemUsage): string {
   if (usage.jobsWithLineItems === 0) {
     return "No parts, products or services were recorded on jobs this period. Adding them to jobs unlocks usage, inventory and job-profitability reporting.";
+  }
+  const lead = usage.byType[0];
+  if (lead && !["PARTS", "PRODUCT", "SERVICE"].includes(lead.type) && lead.usage.top[0]) {
+    return `${lead.label} carry ${fmtMoneyCompact(lead.usage.totalRevenue)} of the ${fmtMoneyCompact(usage.totalRevenue)} on job line items; the largest is ${lead.usage.top[0].name} (${fmtMoneyCompact(lead.usage.top[0].revenue)}).`;
   }
   const leaders = [
     usage.services.top[0] && `${usage.services.top[0].name} was the most-used service (${fmtInt(usage.services.top[0].jobCount)} jobs)`,
@@ -76,16 +81,38 @@ export function usageInsight(usage: LineItemUsage): string {
 
 export async function insertUsageSlide(zip: JSZip, usage: LineItemUsage, periodLabel: string): Promise<string> {
   const w = new ShapeWriter();
+  // Show the three line-item types that actually carry value on this account (e.g. Bundles for a
+  // roofer), not a fixed Parts/Products/Services trio that can all be near zero.
+  const types = usage.byType.filter((t) => t.usage.totalRevenue > 0 || t.usage.jobCount > 0).slice(0, 3);
+  const shown = types.length ? types : [
+    { type: "PARTS", label: "Parts", usage: usage.parts },
+    { type: "PRODUCT", label: "Products", usage: usage.products },
+    { type: "SERVICE", label: "Services", usage: usage.services },
+  ];
   w.header(
-    "Parts, Products & Services Usage",
-    `${periodLabel}  ·  ${fmtInt(usage.jobsWithLineItems)} of ${fmtInt(usage.jobsTotal)} jobs used parts, products or services ` +
-      `(${(usage.attachRate * 100).toFixed(1)}%)`
+    "What Goes on Jobs — Line Items",
+    `${periodLabel}  ·  ${fmtInt(usage.jobsWithLineItems)} of ${fmtInt(usage.jobsTotal)} jobs have line items (${(usage.attachRate * 100).toFixed(1)}%)  ·  ${fmtMoneyCompact(usage.totalRevenue)} in total`
   );
-  drawCard(w, CARD_XS[0], "PARTS", "parts", usage.parts);
-  drawCard(w, CARD_XS[1], "PRODUCTS", "products", usage.products);
-  drawCard(w, CARD_XS[2], "SERVICES", "services", usage.services);
-  w.insight(usageInsight(usage));
-  w.footer("Source: Zuper Jobs — parts, products & services added to jobs created in the period · ranked by number of jobs using each item");
+  shown.forEach((t, i) => drawCard(w, CARD_XS[i], t.label.toUpperCase(), t.label.toLowerCase(), t.usage));
+  const lead = shown[0];
+  const leadItem = lead?.usage.top[0];
+  const leadShare = usage.totalRevenue && lead ? lead.usage.totalRevenue / usage.totalRevenue : 0;
+  const itemShare = usage.totalRevenue && leadItem ? leadItem.revenue / usage.totalRevenue : 0;
+  w.keyCallouts(
+    [
+      ...(leadItem && itemShare >= 0.3
+        ? [{ tone: "watch" as const, headline: `"${truncate(leadItem.name, 40)}" is ${(itemShare * 100).toFixed(0)}% of line-item value (${fmtMoneyCompact(leadItem.revenue)})`, detail: `on ${fmtInt(leadItem.jobCount)} jobs — the account's core offering.`, score: 50, area: "Line items" }]
+        : []),
+      ...(lead && leadShare >= 0.6 && shown.length > 1
+        ? [{ tone: "watch" as const, headline: `${lead.label} make up ${(leadShare * 100).toFixed(0)}% of what's billed on jobs`, detail: `${fmtInt(lead.usage.distinctItems)} different items across ${fmtInt(lead.usage.jobCount)} jobs.`, score: 36, area: "Line items" }]
+        : []),
+      ...(usage.jobsTotal >= 50 && usage.attachRate < 0.3
+        ? [{ tone: "opportunity" as const, headline: `Only ${(usage.attachRate * 100).toFixed(0)}% of jobs have line items`, detail: "adding what's used on each job unlocks job costing, profitability and inventory reporting.", score: 48, area: "Line items" }]
+        : []),
+    ],
+    usageInsight(usage)
+  );
+  w.footer("Source: Zuper Jobs — line items (products[]) on jobs created in the period, by product type · ranked by amount");
   const topOf = (u: LineItemTypeUsage, kind: string) =>
     u.top[0] ? `Top ${kind}: ${u.top[0].name} — ${fmtInt(u.top[0].jobCount)} jobs, ${fmtMoneyCompact(u.top[0].revenue)}.` : null;
   w.notes = {

@@ -2,8 +2,10 @@ import { readFile } from "fs/promises";
 import path from "path";
 import JSZip from "jszip";
 import type { DateRange } from "@/lib/zuper/modules";
-import { buildEbrTokenData, type RunFix } from "./ebrTokens";
+import { buildEbrTokenData, computeSharedDeckData, type RunFix } from "./ebrTokens";
 import { setSlideNotes } from "./slideNotes";
+import { ShapeWriter, appendShapesToSlide, collectCallouts } from "./generatedSlide";
+import { calloutLine } from "@/lib/reports/callouts";
 import { injectLineChartData } from "./chartData";
 import { insertUsageSlide } from "./usageSlide";
 import { insertAutomationSlide } from "./automationSlide";
@@ -57,9 +59,10 @@ export interface GenerateEbrPptxOptions {
 export async function generateEbrPptx(options: GenerateEbrPptxOptions): Promise<Buffer> {
   const { customerId, customerName, customerWebsite, range, reportTitle } = options;
 
-  const [templateBuffer, { tokens, charts, usage, workflowSummary, periodLabel, fixups, notes }] = await Promise.all([
+  const shared = await computeSharedDeckData(customerId, range);
+  const [templateBuffer, { tokens, charts, usage, workflowSummary, periodLabel, fixups, notes, callouts }] = await Promise.all([
     readFile(TEMPLATE_PATH),
-    buildEbrTokenData(customerId, customerName, customerWebsite ?? null, range, reportTitle),
+    buildEbrTokenData(customerId, customerName, customerWebsite ?? null, range, reportTitle, shared),
   ]);
 
   const zip = await JSZip.loadAsync(templateBuffer);
@@ -86,15 +89,24 @@ export async function generateEbrPptx(options: GenerateEbrPptxOptions): Promise<
     }
   }
 
-  // Speaker notes for every template slide (generated slides write their own as they're inserted).
+  // Speaker notes for every template slide (generated slides write their own as they're inserted);
+  // the slide's ranked call-outs lead its CALL OUT section.
   for (const [slidePath, slideNotes] of Object.entries(notes)) {
-    if (zip.file(slidePath)) await setSlideNotes(zip, slidePath, slideNotes);
+    if (!zip.file(slidePath)) continue;
+    const lines = (callouts[slidePath] ?? []).map(calloutLine);
+    await setSlideNotes(zip, slidePath, { ...slideNotes, callouts: [...lines, ...(slideNotes.callouts ?? [])] });
   }
+
+  // Business Performance Overview has empty space under its three cards: put its call-outs there.
+  const panel = new ShapeWriter(900);
+  panel.calloutPanel(791667, 4950000, 10608666, 1400000, callouts["ppt/slides/slide13.xml"] ?? []);
+  if (panel.shapes.length) await appendShapesToSlide(zip, "ppt/slides/slide13.xml", panel);
+  for (const list of Object.values(callouts)) collectCallouts(zip, list);
 
   // Generated (non-template) slides. Template charts are chart1–6; generated charts take the next free numbers.
   await insertUsageSlide(zip, usage, periodLabel);
   const automationSlidePath = await insertAutomationSlide(zip, workflowSummary, customerName, periodLabel);
-  await insertModuleSlides(zip, { customerId, customerName, range, usage, workflowSummary, automationSlidePath });
+  await insertModuleSlides(zip, { customerId, customerName, range, usage, workflowSummary, automationSlidePath, shared });
 
   const buffer = await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
   return buffer;

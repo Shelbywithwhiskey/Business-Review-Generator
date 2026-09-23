@@ -259,16 +259,17 @@ export function buildTemplateNotes(i: TemplateNotesInput): Record<string, SlideN
   set(19, {
     purpose: "Monthly average invoice value and unaccepted quote value over the trailing 13 months.",
     callouts: compact([
-      i.avgInvoicePctChange != null && `Average invoice value ${i.avgInvoicePctChange >= 0 ? "rose" : "fell"} ${Math.abs(i.avgInvoicePctChange).toFixed(0)}% between the first and last month with at least 5 invoices.`,
+      i.avgInvoicePctChange != null && `Average invoice value ${i.avgInvoicePctChange >= 0 ? "rose" : "fell"} ${Math.abs(i.avgInvoicePctChange).toFixed(0)}% in the last 3 months vs the 3 before (months with at least 5 invoices).`,
       ...i.months.filter((m) => m.invoiceCount > 0 && m.invoiceCount < 5).slice(0, 3).map((m) => `${m.label} had only ${m.invoiceCount} invoice${m.invoiceCount === 1 ? "" : "s"}, so its average isn't comparable.`),
-      i.quoteValuePctChange != null && `Unaccepted quote value ${i.quoteValuePctChange >= 0 ? "rose" : "fell"} ${Math.abs(i.quoteValuePctChange).toFixed(0)}% from the first to the last month.`,
+      "Unaccepted quote value always looks highest in the latest months, because those quotes are still being decided — don't present it as a trend.",
       `Accepted quote value across the 13 months: ${money(i.acceptedQuoteValue13m)}.`,
     ]),
     talkingPoints: ["A change in average invoice value can reflect job mix (bigger vs smaller jobs), pricing, or how work is split across invoices — ask the customer which applies before drawing conclusions."],
     metrics: [
       { label: "Monthly average invoice value", definition: "Mean value of non-voided invoices dated in each month.", source: "Zuper Invoices", evidence: "Observed activity" },
       { label: "Monthly unaccepted quote value", definition: "Value of quotes dated in each month that are open, draft or declined (not accepted, not canceled).", source: "Zuper Quotes", evidence: "Observed activity" },
-      { label: "Change %", definition: "Last vs first month of the window. For average invoice value, first/last month with at least 5 invoices, so one or two invoices can't swing it.", source: "Computed", evidence: "Observed change" },
+      { label: "Avg invoice value, last 3 months", definition: "Invoice-weighted average of the last 3 months vs the 3 months before, using only months with at least 5 invoices so a thin month can't swing it.", source: "Computed", evidence: "Observed change" },
+      { label: "Not yet accepted, last 3 months", definition: "Value of open, draft or declined quotes dated in the last 3 months — shown as a value, not a % change, because recent quotes are still being decided.", source: "Zuper Quotes", evidence: "Current state" },
     ],
     caveats: ["Single months with few invoices swing the average a lot — check the invoice count per month before calling out a trend.", "The most recent months' quotes are still open, which inflates unaccepted value at the end of the window.", syncLine],
   });

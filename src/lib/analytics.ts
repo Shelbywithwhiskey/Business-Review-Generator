@@ -421,6 +421,13 @@ export interface LineItemUsage {
   parts: LineItemTypeUsage;
   products: LineItemTypeUsage;
   services: LineItemTypeUsage;
+  /** Every product_type seen on the jobs (BUNDLE, PARTS, PRODUCT, SERVICE, ...), highest amount first. */
+  byType: { type: string; label: string; usage: LineItemTypeUsage }[];
+}
+
+const TYPE_LABELS: Record<string, string> = { PARTS: "Parts", PART: "Parts", PRODUCT: "Products", SERVICE: "Services", BUNDLE: "Bundles" };
+export function lineItemTypeLabel(type: string): string {
+  return TYPE_LABELS[type] ?? type.charAt(0) + type.slice(1).toLowerCase().replace(/_/g, " ");
 }
 
 type UsageBucket = "parts" | "products" | "services";
@@ -459,12 +466,25 @@ export function summarizeLineItemUsage(items: LineItemRow[], jobsTotal: number, 
   const groups: Record<UsageBucket, Map<string, Agg>> = { parts: new Map(), products: new Map(), services: new Map() };
   const jobsByBucket: Record<UsageBucket, Set<string>> = { parts: new Set(), products: new Set(), services: new Set() };
   const jobsWithLineItems = new Set<string>();
+  const byTypeGroups = new Map<string, Map<string, Agg>>();
+  const byTypeJobs = new Map<string, Set<string>>();
   let totalRevenue = 0;
 
   for (const item of items) {
     const revenue = Number(item.total);
     jobsWithLineItems.add(item.zuperJobId);
     totalRevenue += revenue;
+
+    const type = item.productType.startsWith("PART") ? "PARTS" : item.productType;
+    const typeGroup = byTypeGroups.get(type) ?? new Map<string, Agg>();
+    const typeKey = item.productUid ?? item.name;
+    const typeAgg = typeGroup.get(typeKey) ?? { name: item.name, category: item.category, jobs: new Set(), quantity: 0, revenue: 0 };
+    typeAgg.jobs.add(item.zuperJobId);
+    typeAgg.quantity += Number(item.quantity);
+    typeAgg.revenue += revenue;
+    typeGroup.set(typeKey, typeAgg);
+    byTypeGroups.set(type, typeGroup);
+    byTypeJobs.set(type, (byTypeJobs.get(type) ?? new Set()).add(item.zuperJobId));
 
     const bucket = usageBucket(item.productType);
     if (!bucket) continue;
@@ -476,6 +496,25 @@ export function summarizeLineItemUsage(items: LineItemRow[], jobsTotal: number, 
     agg.revenue += revenue;
     groups[bucket].set(key, agg);
   }
+
+  const summarizeGroup = (group: Map<string, Agg>, jobs: Set<string>): LineItemTypeUsage => {
+    const all = [...group.values()];
+    const groupRevenue = all.reduce((sum, a) => sum + a.revenue, 0);
+    return {
+      jobCount: jobs.size,
+      distinctItems: all.length,
+      totalQuantity: all.reduce((sum, a) => sum + a.quantity, 0),
+      totalRevenue: groupRevenue,
+      // Ranked by amount — for the per-type cards, value matters more than frequency.
+      top: all
+        .sort((a, b) => b.revenue - a.revenue || b.jobs.size - a.jobs.size)
+        .slice(0, topN)
+        .map((a) => ({ name: a.name, category: a.category, jobCount: a.jobs.size, quantity: a.quantity, revenue: a.revenue, revenueShare: groupRevenue ? a.revenue / groupRevenue : 0 })),
+    };
+  };
+  const byType = [...byTypeGroups.entries()]
+    .map(([type, group]) => ({ type, label: lineItemTypeLabel(type), usage: summarizeGroup(group, byTypeJobs.get(type) ?? new Set()) }))
+    .sort((a, b) => b.usage.totalRevenue - a.usage.totalRevenue || b.usage.jobCount - a.usage.jobCount);
 
   const summarize = (bucket: UsageBucket): LineItemTypeUsage => {
     const all = [...groups[bucket].values()];
@@ -507,6 +546,7 @@ export function summarizeLineItemUsage(items: LineItemRow[], jobsTotal: number, 
     parts: summarize("parts"),
     products: summarize("products"),
     services: summarize("services"),
+    byType,
   };
 }
 

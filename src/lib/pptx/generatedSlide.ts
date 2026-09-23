@@ -1,6 +1,7 @@
 import type JSZip from "jszip";
 import { buildChartXml, chartFrameXml, type ChartSpec } from "./nativeChart";
 import { setSlideNotes, type SlideNotes } from "./slideNotes";
+import { calloutLine, rank, TONE_LABEL, type Callout, type Tone } from "@/lib/reports/callouts";
 
 // ---------------------------------------------------------------------------
 // Shared plumbing for slides that aren't in templates/ebr-template.pptx but are
@@ -51,9 +52,18 @@ export function run(text: string, { sz, color, bold }: { sz: number; color: stri
   return `<a:r><a:rPr lang="en-US" sz="${sz}"${bold ? ' b="1"' : ""} dirty="0"><a:solidFill><a:srgbClr val="${color}"/></a:solidFill><a:latin typeface="Aptos"/></a:rPr><a:t>${esc(text)}</a:t></a:r>`;
 }
 
+const TONE_COLORS: Record<Tone, string> = { win: "0B7A0B", risk: "B5271C", opportunity: "FD5000", watch: "4B5563" };
+
 export class ShapeWriter {
-  private nextId = 100;
+  private nextId: number;
   readonly shapes: string[] = [];
+  /** Ranked findings for this slide (also collected for the deck's Top Call-outs slide). */
+  callouts: Callout[] = [];
+
+  /** startId: first shape id — use a high value when adding shapes to an existing template slide. */
+  constructor(startId = 100) {
+    this.nextId = startId;
+  }
   /** Native charts; each shape entry holds a {{CHART_n}} rId placeholder resolved in insertGeneratedSlide. */
   readonly charts: ChartSpec[] = [];
   /** Speaker notes written alongside the slide (see slideNotes.ts). */
@@ -133,6 +143,48 @@ export class ShapeWriter {
     this.text(CONTENT_X, 791667, 10583333, 383333, run(subtitle, { sz: 1500, color: COLORS.white }));
   }
 
+  /**
+   * "KEY CALL-OUTS" strip along the bottom (same footprint as the insight bar): the top 3 ranked
+   * call-outs, each tagged WIN / RISK / OPPORTUNITY / WATCH. Falls back to a plain insight line.
+   */
+  keyCallouts(list: Callout[], fallback: string) {
+    const top = rank(list).slice(0, 3);
+    this.callouts = rank(list);
+    if (!top.length) return this.insight(fallback);
+    const y = 5840000;
+    const h = 560000;
+    this.rect(825334, y, 10583333, h, COLORS.white, { radius: 10000 });
+    this.text(1000000, y, 1500000, h, run("KEY CALL-OUTS", { sz: 900, color: COLORS.orange, bold: true }), { anchor: "ctr", wrap: "none" });
+    const lineH = (h - 60000) / 3;
+    top.forEach((c, i) => {
+      const ly = y + 30000 + i * lineH + (3 - top.length) * lineH * 0.5;
+      const tag = run(`${TONE_LABEL[c.tone]}  `, { sz: 780, color: TONE_COLORS[c.tone], bold: true });
+      const body = run(truncate(c.headline, 90), { sz: 860, color: COLORS.ink, bold: true }) + run(truncate(`  —  ${c.detail}`, 130), { sz: 800, color: COLORS.muted });
+      this.text(2450000, ly, 8900000, lineH, tag + body, { anchor: "ctr", wrap: "none" });
+    });
+  }
+
+  /** Bordered card listing call-outs with full text — for template slides with free space. */
+  calloutPanel(x: number, y: number, cx: number, cy: number, list: Callout[], max = 3) {
+    const top = rank(list).slice(0, max);
+    if (!top.length) return;
+    this.rect(x, y, cx, cy, COLORS.white, { radius: 6000, border: COLORS.border });
+    this.text(x + 180000, y + 110000, cx - 360000, 220000, run("KEY CALL-OUTS", { sz: 950, color: COLORS.orange, bold: true }), { wrap: "none" });
+    const rowH = (cy - 400000) / max;
+    top.forEach((c, i) => {
+      const ry = y + 380000 + i * rowH;
+      this.text(
+        x + 180000,
+        ry,
+        cx - 360000,
+        rowH - 20000,
+        run(`${TONE_LABEL[c.tone]}  `, { sz: 850, color: TONE_COLORS[c.tone], bold: true }) +
+          run(c.headline, { sz: 1000, color: COLORS.ink, bold: true }) +
+          run(`  —  ${c.detail}`, { sz: 900, color: COLORS.muted })
+      );
+    });
+  }
+
   /** "→ Insights" bar along the bottom, as on slide14. */
   insight(text: string) {
     this.rect(825334, 5900000, 10583333, 460000, COLORS.white, { radius: 12857 });
@@ -158,6 +210,21 @@ async function readText(zip: JSZip, filePath: string): Promise<string> {
   const file = zip.file(filePath);
   if (!file) throw new Error(`PPTX template is missing ${filePath}`);
   return file.async("string");
+}
+
+// Call-outs from every slide inserted into a deck, for its Top Call-outs summary.
+const deckCallouts = new WeakMap<JSZip, Callout[]>();
+export function collectedCallouts(zip: JSZip): Callout[] {
+  return deckCallouts.get(zip) ?? [];
+}
+export function collectCallouts(zip: JSZip, list: Callout[]) {
+  deckCallouts.set(zip, [...collectedCallouts(zip), ...list]);
+}
+
+/** Adds `shapes` (text/rect only — no charts) on top of an existing slide's content. */
+export async function appendShapesToSlide(zip: JSZip, slidePath: string, shapes: ShapeWriter): Promise<void> {
+  const xml = await readText(zip, slidePath);
+  zip.file(slidePath, xml.replace("</p:spTree>", `${shapes.shapes.join("")}</p:spTree>`));
 }
 
 /** Builds a slide from `shapes` on the style source's background and registers it in the deck right after
@@ -232,6 +299,12 @@ export async function insertGeneratedSlide(zip: JSZip, afterSlide: string, shape
       `<Override PartName="/ppt/slides/${slideName}" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>${chartOverrides.join("")}</Types>`
     )
   );
-  if (shapes.notes) await setSlideNotes(zip, `ppt/slides/${slideName}`, shapes.notes);
+  collectCallouts(zip, shapes.callouts);
+  if (shapes.notes) {
+    // The slide's ranked call-outs lead the notes' CALL OUT section (same wording as on the slide).
+    const lines = shapes.callouts.map(calloutLine);
+    const rest = (shapes.notes.callouts ?? []).filter((c) => !lines.some((l) => l.includes(c.slice(0, 40))));
+    await setSlideNotes(zip, `ppt/slides/${slideName}`, { ...shapes.notes, callouts: [...lines, ...rest] });
+  }
   return `ppt/slides/${slideName}`;
 }

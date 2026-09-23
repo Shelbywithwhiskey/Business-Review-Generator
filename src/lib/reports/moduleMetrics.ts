@@ -116,6 +116,8 @@ export interface JobDeepDive {
   openByStatus: { name: string; count: number; medianAgeDays: number | null }[];
   /** Average hours jobs spent in each status (Zuper's time_on_status), heaviest first. */
   timeInStatus: { name: string; avgHours: number; jobs: number }[];
+  /** Statuses ranked by total job-days spent in them (avg × jobs) — where the time actually goes. */
+  statusLoad: { name: string; jobDays: number; avgDays: number; jobs: number }[];
 }
 
 export async function computeJobDeepDive(customerId: string, range: DateRange): Promise<JobDeepDive> {
@@ -199,8 +201,12 @@ export async function computeJobDeepDive(customerId: string, range: DateRange): 
       .slice(0, 7),
     timeInStatus: [...statusTime.entries()]
       .map(([name, t]) => ({ name, avgHours: t.minutes / 60 / t.jobs, jobs: t.jobs }))
-      .filter((t) => t.jobs >= 3)
+      .filter((t) => t.jobs >= Math.min(10, Math.max(3, Math.round(jobs.length * 0.02))))
       .sort((a, b) => b.avgHours - a.avgHours)
+      .slice(0, 7),
+    statusLoad: [...statusTime.entries()]
+      .map(([name, t]) => ({ name, jobDays: t.minutes / 1440, avgDays: t.minutes / 1440 / t.jobs, jobs: t.jobs }))
+      .sort((a, b) => b.jobDays - a.jobDays)
       .slice(0, 7),
   };
 }
@@ -219,6 +225,8 @@ export interface AccountsDeepDive {
   propertiesByState: { state: string; count: number }[];
   customerCategories: { name: string; count: number }[];
   topCustomersByLtv: { name: string; ltv: number }[];
+  /** New customers per month of the period. */
+  customersMonthly: { label: string; count: number }[];
   top5LtvShare: number;
   totalLtv: number;
   totalReceivables: number;
@@ -270,6 +278,10 @@ export async function computeAccountsDeepDive(customerId: string, range: DateRan
     propertiesByState: tally(properties, (p) => p.state).slice(0, 6).map(([state, count]) => ({ state, count })),
     customerCategories: tally(customers, (c) => c.category).slice(0, 5).map(([name, count]) => ({ name, count })),
     topCustomersByLtv: byLtv.slice(0, 6).filter((c) => Number(c.ltv) > 0).map((c) => ({ name: c.name, ltv: Number(c.ltv) })),
+    customersMonthly: monthBuckets(range).map((m) => ({
+      label: m.label,
+      count: customers.filter((c) => c.createdInZuperAt && c.createdInZuperAt >= m.start && c.createdInZuperAt < m.end).length,
+    })),
     top5LtvShare: totalLtv ? byLtv.slice(0, 5).reduce((s, c) => s + Number(c.ltv), 0) / totalLtv : 0,
     totalLtv,
     totalReceivables: customers.reduce((s, c) => s + Number(c.receivables), 0),
@@ -463,6 +475,8 @@ export interface QuoteDeepDive {
   medianDaysToAccept: number | null;
   acceptSample: number;
   expiredOpen: number;
+  /** Open (sent, undecided) quotes dated more than 30 days before today. */
+  staleOpen: { count: number; value: number };
   monthly: { label: string; created: number; converted: number }[];
 }
 
@@ -492,6 +506,11 @@ export async function computeQuoteDeepDive(customerId: string, range: DateRange)
     medianDaysToAccept: median(toAccept.filter((d) => d >= 0)),
     acceptSample: toAccept.length,
     expiredOpen: quotes.filter((q) => q.isExpired && !q.isConverted).length,
+    staleOpen: (() => {
+      const cutoff = Date.now() - 30 * DAY_MS;
+      const stale = quotes.filter((q, i) => outcomes[i] === "open" && (q.sentAt ?? q.estimateAt).getTime() < cutoff);
+      return { count: stale.length, value: stale.reduce((s, q) => s + Number(q.value), 0) };
+    })(),
     monthly: monthBuckets(range).map((m) => ({
       label: m.label,
       created: quotes.filter((q) => q.estimateAt >= m.start && q.estimateAt < m.end).length,

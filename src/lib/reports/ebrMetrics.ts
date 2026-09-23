@@ -629,6 +629,7 @@ export interface MonthBucket {
   /** Mean value of non-voided invoices dated in the month. */
   avgInvoiceValue: number;
   invoiceCount: number;
+  quoteCount: number;
   /** Open, draft or declined quotes dated in the month. */
   unacceptedQuoteValue: number;
   acceptedQuoteValue: number;
@@ -672,6 +673,7 @@ export async function computeMonthlySeries(customerId: string, range: DateRange,
       label: `${MONTH_ABBR[start.getUTCMonth()]}-${start.getUTCFullYear()}`,
       avgInvoiceValue,
       invoiceCount: billable.length,
+      quoteCount: quotes.length,
       unacceptedQuoteValue,
       acceptedQuoteValue,
     });

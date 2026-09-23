@@ -4,12 +4,8 @@ import type { LineItemUsage } from "@/lib/analytics";
 import type { WorkflowSummary } from "@/lib/reports/ebrMetrics";
 import {
   computeAccountsDeepDive,
-  computeExecutionDeepDive,
   computeInvoiceDeepDive,
-  computeJobDeepDive,
   computeProjectsDeepDive,
-  computeQuoteDeepDive,
-  computeSyncInfo,
   computeWorkforceDeepDive,
   type AccountsDeepDive,
   type ExecutionDeepDive,
@@ -21,13 +17,18 @@ import {
   type SyncInfo,
   type WorkforceDeepDive,
 } from "@/lib/reports/moduleMetrics";
-import { COLORS, CONTENT_W, CONTENT_X, ShapeWriter, fmtInt, fmtMoneyCompact, insertGeneratedSlide, run, truncate } from "./generatedSlide";
+import { COLORS, CONTENT_W, CONTENT_X, ShapeWriter, collectedCallouts, fmtInt, fmtMoneyCompact, insertGeneratedSlide, run, truncate } from "./generatedSlide";
 import { syncCaveat } from "./templateNotes";
-import { computeCatalogAnalyses, computeCoverage, computeJobServiceDelivery, computePortalAndPay } from "@/lib/reports/catalogMetrics";
-import { connectSlide, coverageSlides, insertChain, jobServiceSlide, moduleSlide, portalPaySlide, timeOnSiteSlide } from "./catalogSlides";
+import { computeCoverage, computePortalAndPay } from "@/lib/reports/catalogMetrics";
+import { SETUP_MODULES, connectSlide, coverageSlides, insertChain, jobServiceSlide, moduleSlide, portalPaySlide, setupSlide, timeOnSiteSlide } from "./catalogSlides";
 import { INVOICE_COLLECTION_DEFINITION, QUOTE_ACCEPTANCE_DEFINITION } from "@/lib/reports/classify";
+import { momentum, topAcross, type Callout } from "@/lib/reports/callouts";
+import type { SharedDeckData } from "./ebrTokens";
 
 const compact = (xs: (string | number | null | false | undefined)[]) => xs.filter((x): x is string => typeof x === "string" && x.length > 0);
+type MaybeCallout = Callout | null | undefined | false | 0 | "";
+const co = (xs: MaybeCallout[]): Callout[] => xs.filter((x): x is Callout => !!x && typeof x === "object");
+const pct0 = (n: number) => `${(n * 100).toFixed(0)}%`;
 
 // ---------------------------------------------------------------------------
 // Module deep-dive slides (Jobs, Customers/Organizations/Properties, Team &
@@ -47,7 +48,7 @@ const NEUTRAL = "9CA3AF";
 
 const KPI_Y = 1300000;
 const BODY_Y = 2260000;
-const BODY_H = 3520000;
+const BODY_H = 3480000;
 const GAP = 150000;
 const HALF_W = (CONTENT_W - GAP) / 2;
 
@@ -75,6 +76,7 @@ function pct(n: number, digits = 1): string {
 
 function fmtDuration(hours: number | null): string {
   if (hours == null) return "—";
+  if (hours < 0.1) return "At creation";
   return hours < 48 ? `${hours.toFixed(1)} h` : `${(hours / 24).toFixed(1)} days`;
 }
 
@@ -223,12 +225,49 @@ function jobsVolumeSlide(ctx: DeckContext, j: JobDeepDive): ShapeWriter {
 
   const top = j.categories[0];
   const busiest = [...j.monthly].sort((x, y) => y.created - x.created)[0];
-  w.insight(
+  const trend = momentum(j.monthly.map((m) => ({ label: m.label, value: m.created })), 3, 30);
+  const catRates = j.categories.filter((c) => c.created >= 10 && !c.name.startsWith("Other"));
+  const best = [...catRates].sort((a, b) => b.completed / b.created - a.completed / a.created)[0];
+  const worst = [...catRates].sort((a, b) => a.completed / a.created - b.completed / b.created)[0];
+  w.keyCallouts(
+    co([
+      trend?.change != null &&
+        Math.abs(trend.change) >= 0.1 && {
+          tone: trend.change > 0 ? "win" : "risk",
+          headline: `Job volume ${trend.change > 0 ? "up" : "down"} ${pct0(Math.abs(trend.change))} — ${fmtInt(trend.recent)} jobs in ${trend.recentLabel}`,
+          detail: `vs ${fmtInt(trend.prior)} in ${trend.priorLabel}${trend.change > 0 ? "; more of the business is running through Zuper" : "; ask what changed in demand or intake"}.`,
+          score: 58 + Math.min(20, Math.abs(trend.change) * 30),
+          area: "Jobs",
+        },
+      best &&
+        worst &&
+        best !== worst && {
+          tone: "watch",
+          headline: `${best.name} completes ${pct0(best.completed / best.created)} of jobs; ${worst.name} ${pct0(worst.completed / worst.created)}`,
+          detail: `categories run on different clocks — judge completion per category, not the ${pct0(j.completionRate)} overall.`,
+          score: 48,
+          area: "Jobs",
+        },
+      j.unscheduledOpen > 0 &&
+        j.created > 0 && {
+          tone: j.unscheduledOpen / j.created > 0.25 ? "risk" : "watch",
+          headline: `${fmtInt(j.unscheduledOpen)} open jobs have no schedule (${pct0(j.unscheduledOpen / j.created)} of the period's jobs)`,
+          detail: "unscheduled work is invisible on the dispatch board — review the backlog weekly.",
+          score: j.unscheduledOpen / j.created > 0.25 ? 62 : 40,
+          area: "Jobs",
+        },
+      top &&
+        j.created > 0 &&
+        top.created / j.created > 0.6 && {
+          tone: "watch",
+          headline: `${top.name} is ${pct0(top.created / j.created)} of all jobs (${fmtInt(top.created)})`,
+          detail: "one category carries most of the volume — confirm other work is categorized correctly.",
+          score: 35,
+          area: "Jobs",
+        },
+    ]),
     j.created
-      ? `${pct(j.completionRate)} of the ${fmtInt(j.created)} jobs created this period are completed` +
-          (top ? `; ${top.name} is the largest category (${fmtInt(top.created)} jobs, ${pct(top.created / j.created, 0)})` : "") +
-          (busiest?.created ? `; busiest month was ${busiest.label} with ${fmtInt(busiest.created)} jobs created` : "") +
-          (j.unscheduledOpen ? `. ${plural(j.unscheduledOpen, "open job")} still ${j.unscheduledOpen === 1 ? "has" : "have"} no schedule.` : ".")
+      ? `${pct(j.completionRate)} of the ${fmtInt(j.created)} jobs created this period are completed` + (busiest?.created ? `; busiest month was ${busiest.label} (${fmtInt(busiest.created)}).` : ".")
       : "No jobs were created in this period."
   );
   w.footer(`Source: Zuper Jobs · jobs created in the period; monthly "Completed" = jobs completed in that month · ${synced(ctx)}`);
@@ -274,26 +313,56 @@ function jobsLifecycleSlide(ctx: DeckContext, j: JobDeepDive): ShapeWriter {
     });
   } else w.empty(a, "No open jobs from this period");
 
-  const b = w.card(right.x, right.y, right.cx, right.cy, "AVERAGE HOURS SPENT IN EACH STATUS");
+  const inDays = j.timeInStatus.some((t) => t.avgHours >= 48);
+  const b = w.card(right.x, right.y, right.cx, right.cy, inDays ? "AVERAGE DAYS SPENT IN EACH STATUS" : "AVERAGE HOURS SPENT IN EACH STATUS");
   if (j.timeInStatus.length) {
     w.chart(b.x, b.y, b.cx, b.cy, {
       kind: "bar",
       categories: j.timeInStatus.map((t) => truncate(t.name, 28)),
-      series: [{ name: "Avg hours in status", values: j.timeInStatus.map((t) => Math.round(t.avgHours * 10) / 10), color: SERIES[1] }],
+      series: [{ name: inDays ? "Avg days in status" : "Avg hours in status", values: j.timeInStatus.map((t) => Math.round((inDays ? t.avgHours / 24 : t.avgHours) * 10) / 10), color: SERIES[1] }],
       numberFormat: "#,##0.0",
     });
   } else w.empty(b, "Not enough status history yet");
 
   const slowest = j.timeInStatus[0];
   const biggestOpen = j.openByStatus[0];
-  w.insight(
-    [
-      slowest ? `Jobs spend the longest in "${slowest.name}" — ${fmtDuration(slowest.avgHours)} on average across ${plural(slowest.jobs, "job")}` : null,
-      biggestOpen ? `the largest open backlog is "${biggestOpen.name}" (${plural(biggestOpen.count, "job")}, median age ${biggestOpen.medianAgeDays?.toFixed(0) ?? "—"} days)` : null,
-      j.medianHoursToSchedule != null ? `half of scheduled jobs were scheduled within ${fmtDuration(j.medianHoursToSchedule)} of creation` : null,
-    ]
-      .filter(Boolean)
-      .join("; ") + "."
+  const load = j.statusLoad[0];
+  const loadShare = load ? load.jobDays / Math.max(j.statusLoad.reduce((s, x) => s + x.jobDays, 0), 1) : 0;
+  w.keyCallouts(
+    co([
+      biggestOpen &&
+        biggestOpen.count >= 10 && {
+          tone: (biggestOpen.medianAgeDays ?? 0) > 30 ? "risk" : "watch",
+          headline: `${fmtInt(biggestOpen.count)} open jobs sit in "${biggestOpen.name}" — median age ${biggestOpen.medianAgeDays?.toFixed(0) ?? "—"} days`,
+          detail: (biggestOpen.medianAgeDays ?? 0) > 30 ? "work is stalling here; a follow-up workflow or weekly review would move it." : "the biggest queue right now.",
+          score: (biggestOpen.medianAgeDays ?? 0) > 30 ? 70 : 45,
+          area: "Jobs",
+        },
+      load &&
+        load.jobs >= 10 && {
+          tone: "watch",
+          headline: `"${load.name}" absorbs ${pct0(loadShare)} of all time jobs spend in a status`,
+          detail: `${fmtInt(load.jobs)} jobs × ${load.avgDays.toFixed(1)} days on average — the single biggest lever on cycle time.`,
+          score: 55,
+          area: "Jobs",
+        },
+      j.medianHoursToSchedule != null &&
+        j.medianHoursToSchedule < 1 && {
+          tone: "win",
+          headline: "Jobs are scheduled as soon as they're created",
+          detail: `median time from creation to schedule is ${fmtDuration(j.medianHoursToSchedule).toLowerCase()} — no scheduling backlog.`,
+          score: 30,
+          area: "Jobs",
+        },
+      j.medianDaysCreatedToComplete != null && {
+        tone: "watch",
+        headline: `Median job takes ${j.medianDaysCreatedToComplete.toFixed(1)} days from creation to completion`,
+        detail: slowest ? `slowest status on average: "${slowest.name}" (${fmtDuration(slowest.avgHours)}).` : "set a target cycle time to track next quarter.",
+        score: 38,
+        area: "Jobs",
+      },
+    ]),
+    "Not enough status history to show where jobs slow down."
   );
   w.footer(`Source: Zuper Jobs status history (time on each status, as recorded by Zuper) · ${plural(j.lifecycleSample, "scheduled job")} measured · ages as of today · ${synced(ctx)}`);
   w.notes = {
@@ -346,8 +415,17 @@ function accountsSlide(ctx: DeckContext, a: AccountsDeepDive): ShapeWriter {
     });
   } else w.empty(orgCard, "No customer activity recorded");
 
-  const propCard = w.card(right.x, right.y, right.cx, right.cy, a.topPropertiesByJobs.length ? "MOST-SERVICED PROPERTIES (ALL-TIME JOBS)" : "CUSTOMERS BY CATEGORY");
-  if (a.topPropertiesByJobs.length) {
+  // A property ranking where every property has 1–2 jobs says nothing — show customer growth instead.
+  const propsMeaningful = a.topPropertiesByJobs.length > 0 && a.topPropertiesByJobs[0].jobs >= 3;
+  const showGrowth = !propsMeaningful && a.customersMonthly.some((m) => m.count > 0);
+  const propCard = w.card(right.x, right.y, right.cx, right.cy, propsMeaningful ? "MOST-SERVICED PROPERTIES (ALL-TIME JOBS)" : showGrowth ? "NEW CUSTOMERS PER MONTH" : "CUSTOMERS BY CATEGORY");
+  if (showGrowth) {
+    w.chart(propCard.x, propCard.y, propCard.cx, propCard.cy, {
+      kind: "column",
+      categories: a.customersMonthly.map((m) => m.label),
+      series: [{ name: "New customers", values: a.customersMonthly.map((m) => m.count), color: SERIES[1] }],
+    });
+  } else if (propsMeaningful) {
     w.chart(propCard.x, propCard.y, propCard.cx, propCard.cy, {
       kind: "bar",
       categories: a.topPropertiesByJobs.map((p) => truncate(p.name, 28)),
@@ -363,16 +441,48 @@ function accountsSlide(ctx: DeckContext, a: AccountsDeepDive): ShapeWriter {
   } else w.empty(propCard, "Properties are not in use on this account");
 
   const topOrg = a.topOrganizationsByJobs[0];
-  const topProp = a.topPropertiesByJobs[0];
-  w.insight(
-    [
-      topOrg && a.jobsWithOrganization ? `${topOrg.name} generated the most work this period (${plural(topOrg.jobs, "job")}, ${pct(topOrg.jobs / a.jobsWithOrganization, 0)} of organization-linked jobs)` : null,
-      topProp ? `${topProp.name} is the most-serviced property (${plural(topProp.jobs, "job")} all-time)` : null,
-      `the top 5 customers hold ${pct(a.top5LtvShare, 0)} of lifetime value`,
-      `${pct(a.customers.repeatShare, 0)} of customers have booked more than one job`,
-    ]
-      .filter(Boolean)
-      .join("; ") + "."
+  const custTrend = momentum(a.customersMonthly.map((m) => ({ label: m.label, value: m.count })), 3, 20);
+  w.keyCallouts(
+    co([
+      a.customers.newInPeriod > 0 && {
+        tone: "win",
+        headline: `${fmtInt(a.customers.newInPeriod)} new customers added this period`,
+        detail: `${pct0(a.customers.newInPeriod / Math.max(a.customers.total, 1))} of the ${fmtInt(a.customers.total)}-customer base${custTrend?.change != null ? `; ${custTrend.change >= 0 ? "up" : "down"} ${pct0(Math.abs(custTrend.change))} in ${custTrend.recentLabel}` : ""}.`,
+        score: 50,
+        area: "Customers",
+      },
+      a.customers.total >= 50 &&
+        a.customers.repeatShare < 0.2 && {
+          tone: "opportunity",
+          headline: `Only ${pct0(a.customers.repeatShare)} of customers have booked more than one job`,
+          detail: "repeat work is the cheapest growth — maintenance plans, recurring jobs or follow-up campaigns to past customers.",
+          score: 60,
+          area: "Customers",
+        },
+      a.top5LtvShare > 0.5 && {
+        tone: "risk",
+        headline: `Top 5 customers hold ${pct0(a.top5LtvShare)} of lifetime value`,
+        detail: "revenue is concentrated — losing one would be felt.",
+        score: 58,
+        area: "Customers",
+      },
+      topOrg &&
+        a.jobsWithOrganization > 0 && {
+          tone: "watch",
+          headline: `${topOrg.name} drove ${pct0(topOrg.jobs / a.jobsWithOrganization)} of organization jobs`,
+          detail: `${fmtInt(topOrg.jobs)} jobs this period — the most important B2B relationship.`,
+          score: 45,
+          area: "Customers",
+        },
+      a.totalReceivables > 0 && {
+        tone: "watch",
+        headline: `${fmtMoneyCompact(a.totalReceivables)} in customer receivables (all-time)`,
+        detail: "Zuper's own ledger figure across every customer — ties to the collections slides.",
+        score: 30,
+        area: "Customers",
+      },
+    ]),
+    `${fmtInt(a.customers.total)} customers on the account.`
   );
   w.footer(`Source: Zuper Customers, Organizations & Properties · "new" by created date · lifetime value, receivables and property job counts are Zuper's all-time figures · ${synced(ctx)}`);
   w.notes = {
@@ -400,7 +510,7 @@ function accountsSlide(ctx: DeckContext, a: AccountsDeepDive): ShapeWriter {
 
 // ---- 5. Team & time ------------------------------------------------------------------
 
-function workforceSlide(ctx: DeckContext, t: WorkforceDeepDive, jobsCreated: number): ShapeWriter {
+function workforceSlide(ctx: DeckContext, t: WorkforceDeepDive, jobsCreated: number, jobTimelogs: { entries: number; hours: number; people: number } | null = null): ShapeWriter {
   const w = new ShapeWriter();
   w.header("Team, Workload & Time Tracking", `Jobs created ${periodText(ctx.range)}  ·  ${plural(t.teamSize, "active user")}`);
   const assignedShare = jobsCreated ? t.jobsAssigned / jobsCreated : 0;
@@ -428,20 +538,66 @@ function workforceSlide(ctx: DeckContext, t: WorkforceDeepDive, jobsCreated: num
   const nx = CONTENT_X + wide.cx + GAP;
   const b = w.card(nx, BODY_Y, CONTENT_W - wide.cx - GAP, BODY_H, "TIME TRACKING");
   const message = t.timesheetEvents
-    ? `${plural(t.timesheetEvents, "clock-in/out event")} recorded, totalling ${fmtInt(t.timesheetHours)} hours on the clock in this period.`
-    : "No timesheet clock-ins or job time logs were recorded in this period. Turning on clock-in/out and job time logging unlocks utilization, overtime and labor-cost-per-job reporting.";
+    ? `${plural(t.timesheetEvents, "clock-in/out event")} recorded, totalling ${fmtInt(t.timesheetHours)} hours on the clock in this period.` +
+      (jobTimelogs ? ` Plus ${plural(jobTimelogs.entries, "job time log")} (${fmtInt(jobTimelogs.hours)} h).` : "")
+    : jobTimelogs
+      ? `No shift clock-ins (timesheets) this period. ${plural(jobTimelogs.entries, "job time log")} were recorded (${fmtInt(jobTimelogs.hours)} h, ${fmtInt(jobTimelogs.people)} ${jobTimelogs.people === 1 ? "person" : "people"}) — see the Time Logged slide. Consistent clock-in unlocks utilization and labor-cost-per-job reporting.`
+      : "No timesheet clock-ins or job time logs were recorded in this period. Turning on clock-in/out and job time logging unlocks utilization, overtime and labor-cost-per-job reporting.";
   w.text(b.x + 60000, b.y + 100000, b.cx - 120000, b.cy - 200000, run(message, { sz: 1100, color: COLORS.ink }));
 
-  const top = t.byTechnician[0];
+  const byAssigned = [...t.byTechnician].sort((x, y) => y.assigned - x.assigned);
+  const top = byAssigned[0];
   const topShare = top && t.jobsAssigned ? top.assigned / t.jobsAssigned : 0;
-  w.insight(
-    [
-      top ? `${top.name} carried the most work (${plural(top.assigned, "job")} assigned, ${fmtInt(top.completed)} completed — ${pct(topShare, 0)} of all assigned jobs)` : null,
-      t.jobsUnassigned ? `${plural(t.jobsUnassigned, "job")} from this period ${t.jobsUnassigned === 1 ? "has" : "have"} no technician assigned` : null,
-      t.timesheetEvents ? null : "time tracking is not in use",
-    ]
-      .filter(Boolean)
-      .join("; ") + "."
+  const top3Share = t.jobsAssigned ? byAssigned.slice(0, 3).reduce((s, p) => s + p.assigned, 0) / t.jobsAssigned : 0;
+  const rated = byAssigned.filter((p) => p.assigned >= 20);
+  const fastest = [...rated].sort((x, y) => y.completed / y.assigned - x.completed / x.assigned)[0];
+  const slowestTech = [...rated].sort((x, y) => x.completed / x.assigned - y.completed / y.assigned)[0];
+  w.keyCallouts(
+    co([
+      top3Share > 0.6 &&
+        byAssigned.length > 3 && {
+          tone: "risk",
+          headline: `3 people carry ${pct0(top3Share)} of all assigned jobs`,
+          detail: `${byAssigned.slice(0, 3).map((p) => p.name).join(", ")} — a key-person dependency if one is out.`,
+          score: 60,
+          area: "Team",
+        },
+      fastest &&
+        slowestTech &&
+        fastest !== slowestTech &&
+        fastest.completed / fastest.assigned - slowestTech.completed / slowestTech.assigned >= 0.2 && {
+          tone: "watch",
+          headline: `Completion ranges from ${pct0(slowestTech.completed / slowestTech.assigned)} (${slowestTech.name}) to ${pct0(fastest.completed / fastest.assigned)} (${fastest.name})`,
+          detail: "among people with 20+ assigned jobs — a coaching or workload-balance conversation.",
+          score: 50,
+          area: "Team",
+        },
+      t.jobsUnassigned > 0 &&
+        jobsCreated > 0 && {
+          tone: t.jobsUnassigned / jobsCreated > 0.2 ? "risk" : "watch",
+          headline: `${fmtInt(t.jobsUnassigned)} jobs have no one assigned (${pct0(t.jobsUnassigned / jobsCreated)})`,
+          detail: "unassigned jobs don't reach anyone's mobile app — assign or close them.",
+          score: t.jobsUnassigned / jobsCreated > 0.2 ? 58 : 38,
+          area: "Team",
+        },
+      !t.timesheetEvents &&
+        !jobTimelogs && {
+        tone: "opportunity",
+        headline: "Time tracking isn't in use",
+        detail: "clock-in/out unlocks utilization, overtime and labor cost per job.",
+        score: 35,
+        area: "Team",
+      },
+      top &&
+        !(top3Share > 0.6 && byAssigned.length > 3) && {
+          tone: "watch",
+          headline: `${top.name} carried the most work — ${fmtInt(top.assigned)} jobs (${pct0(topShare)})`,
+          detail: `${fmtInt(top.completed)} of them completed.`,
+          score: 30,
+          area: "Team",
+        },
+    ]),
+    `${plural(t.teamSize, "active user")} on the account.`
   );
   w.footer(`Source: Zuper Jobs (primary assignee) & Timesheets · jobs created in the period · ${synced(ctx)}`);
   w.notes = {
@@ -478,7 +634,26 @@ function projectsSlide(ctx: DeckContext, p: ProjectsDeepDive): ShapeWriter {
   if (p.byStatus.length) {
     w.chart(a.x, a.y, a.cx, a.cy, { kind: "bar", categories: p.byStatus.map((s) => truncate(s.name, 30)), series: [{ name: "Projects", values: p.byStatus.map((s) => s.count), color: SERIES[0] }] });
   } else w.empty(a, "No projects were created in this period");
-  w.insight(p.byStatus[0] ? `${plural(p.createdInPeriod, "project")} created this period; the most common status is "${p.byStatus[0].name}" (${fmtInt(p.byStatus[0].count)}).` : `${plural(p.total, "project")} on the account; none were created this period.`);
+  w.keyCallouts(
+    co([
+      p.createdInPeriod > 0 && {
+        tone: "win",
+        headline: `${fmtInt(p.createdInPeriod)} projects created this period`,
+        detail: `${fmtInt(p.total)} on the account — multi-job work is being managed as projects in Zuper.`,
+        score: 40,
+        area: "Projects",
+      },
+      p.byStatus[0] &&
+        p.createdInPeriod > 0 && {
+          tone: "watch",
+          headline: `${pct0(p.byStatus[0].count / p.createdInPeriod)} of new projects are in "${p.byStatus[0].name}"`,
+          detail: `${fmtInt(p.byStatus[0].count)} projects — check they're moving to the next stage.`,
+          score: 38,
+          area: "Projects",
+        },
+    ]),
+    `${plural(p.total, "project")} on the account; none were created this period.`
+  );
   w.footer(`Source: Zuper Projects · by project created date · ${synced(ctx)}`);
   w.notes = {
     purpose: "Multi-job projects on the account and their current status.",
@@ -527,13 +702,50 @@ function quotesSlide(ctx: DeckContext, q: QuoteDeepDive): ShapeWriter {
   } else w.empty(b, "No quotes created in this period");
 
   const topStatus = q.byStatus[0];
-  w.insight(
-    q.count
-      ? `${pct(q.conversionRate)} of ${plural(q.count, "quote")} were approved or converted, winning ${fmtMoneyCompact(q.convertedValue)}` +
-          (topStatus ? `; the most common status is ${topStatus.name.replace(/_/g, " ").toLowerCase()} (${fmtInt(topStatus.count)})` : "") +
-          (q.medianDaysToAccept != null ? `; approvals took a median ${q.medianDaysToAccept.toFixed(1)} days` : "") +
-          "."
-      : "No quotes were created in this period — quoting in Zuper would make pipeline and win-rate visible here."
+  const qTrend = momentum(q.monthly.map((m) => ({ label: m.label, value: m.created })), 3, 30);
+  w.keyCallouts(
+    co([
+      q.staleOpen.count >= 5 && {
+        tone: "opportunity",
+        headline: `${fmtInt(q.staleOpen.count)} quotes worth ${fmtMoneyCompact(q.staleOpen.value)} have waited 30+ days for a decision`,
+        detail: "the recoverable pipeline — an automated follow-up sequence before expiry wins some back.",
+        score: 74,
+        area: "Quotes",
+      },
+      q.sent > 0 &&
+        q.expiredOpen / q.sent >= 0.15 && {
+          tone: "risk",
+          headline: `${fmtInt(q.expiredOpen)} quotes expired without approval (${pct0(q.expiredOpen / q.sent)} of sent)`,
+          detail: "expired quotes are lost deals unless someone follows up before the expiry date.",
+          score: 64,
+          area: "Quotes",
+        },
+      q.medianDaysToAccept != null &&
+        q.medianDaysToAccept <= 3 &&
+        q.acceptSample >= 10 && {
+          tone: "win",
+          headline: `Accepted quotes close fast — median ${q.medianDaysToAccept.toFixed(1)} days`,
+          detail: "customers who say yes decide quickly, so a quote still open after a week needs a nudge.",
+          score: 45,
+          area: "Quotes",
+        },
+      qTrend?.change != null &&
+        Math.abs(qTrend.change) >= 0.15 && {
+          tone: qTrend.change > 0 ? "win" : "risk",
+          headline: `Quote volume ${qTrend.change > 0 ? "up" : "down"} ${pct0(Math.abs(qTrend.change))} — ${fmtInt(qTrend.recent)} in ${qTrend.recentLabel}`,
+          detail: `vs ${fmtInt(qTrend.prior)} in ${qTrend.priorLabel}.`,
+          score: 50,
+          area: "Quotes",
+        },
+      q.sent > 0 && {
+        tone: q.conversionRate < 0.3 ? "risk" : q.conversionRate >= 0.5 ? "win" : "watch",
+        headline: `${pct(q.conversionRate)} of ${plural(q.sent, "sent quote")} accepted (${fmtMoneyCompact(q.convertedValue)})`,
+        detail: topStatus ? `most quotes sit in "${topStatus.name.replace(/_/g, " ").toLowerCase()}" (${fmtInt(topStatus.count)}).` : "",
+        score: 44,
+        area: "Quotes",
+      },
+    ]),
+    "No quotes were created in this period — quoting in Zuper would make pipeline and win-rate visible here."
   );
   w.footer(`Source: Zuper Quotes (estimates) · by quote date · approval time from sent (or quote) date to acceptance · ${synced(ctx)}`);
   w.notes = {
@@ -590,12 +802,54 @@ function invoicesSlide(ctx: DeckContext, inv: InvoiceDeepDive): ShapeWriter {
     });
   } else w.empty(b, "No payments recorded in this period");
 
-  w.insight(
-    `${fmtMoneyCompact(inv.outstanding)} of ${fmtMoneyCompact(inv.invoiced)} invoiced is still outstanding` +
-      (over60 ? `, including ${fmtMoneyCompact(over60)} more than 60 days past due` : "") +
-      (inv.medianDaysToPay != null ? `; paid invoices took a median ${inv.medianDaysToPay.toFixed(0)} days` : "") +
-      (inv.paymentsTotal ? `; only ${pct(inv.onlineShare, 0)} of ${fmtMoneyCompact(inv.paymentsTotal)} received was paid online` : "") +
-      "."
+  const pastDue = inv.aging.filter((b) => b.label !== "Not yet due");
+  const biggestBucket = [...pastDue].sort((x, y) => y.amount - x.amount)[0];
+  const checkMode = inv.paymentModes.find((m) => /check|cheque/i.test(m.name));
+  const checkShare = checkMode && inv.paymentsTotal ? checkMode.amount / inv.paymentsTotal : 0;
+  w.keyCallouts(
+    co([
+      over60 > 0 && {
+        tone: "risk",
+        headline: `${fmtMoneyCompact(over60)} is 60+ days past due`,
+        detail: `part of ${fmtMoneyCompact(inv.outstanding)} still outstanding on this period's invoices — the collections priority.`,
+        score: over60 > 50_000 ? 72 : 55,
+        area: "Collections",
+      },
+      biggestBucket &&
+        biggestBucket.amount > 0 &&
+        biggestBucket.label !== "90+ days" && {
+          tone: "watch",
+          headline: `Most overdue money is ${biggestBucket.label} past due (${fmtMoneyCompact(biggestBucket.amount)})`,
+          detail: "chase it now, before it ages into the hard-to-collect buckets.",
+          score: 52,
+          area: "Collections",
+        },
+      checkShare >= 0.4 && {
+        tone: "opportunity",
+        headline: `Checks are ${pct0(checkShare)} of payments (${fmtMoneyCompact(checkMode!.amount)})`,
+        detail: "moving them to Zuper Pay (card, ACH, payment links) gets cash in sooner with less manual reconciliation.",
+        score: 62,
+        area: "Collections",
+      },
+      checkShare < 0.4 &&
+        inv.paymentsTotal > 0 &&
+        inv.onlineShare < 0.2 && {
+          tone: "opportunity",
+          headline: `Only ${pct0(inv.onlineShare)} of ${fmtMoneyCompact(inv.paymentsTotal)} received was paid online`,
+          detail: "Zuper Pay payment links and card-on-file are the lever.",
+          score: 58,
+          area: "Collections",
+        },
+      inv.medianDaysToPay != null &&
+        inv.paidSample >= 10 && {
+          tone: inv.medianDaysToPay <= 15 ? "win" : "watch",
+          headline: `Paid invoices were paid in a median ${inv.medianDaysToPay.toFixed(0)} days`,
+          detail: inv.paidOnTimeShare != null ? `${pct0(inv.paidOnTimeShare)} of them by their due date.` : "",
+          score: inv.medianDaysToPay <= 15 ? 42 : 48,
+          area: "Collections",
+        },
+    ]),
+    `${fmtMoneyCompact(inv.outstanding)} of ${fmtMoneyCompact(inv.invoiced)} invoiced is still outstanding.`
   );
   w.footer(`Source: Zuper Invoices & Payments · invoices by invoice date, aging vs due date as of today · payments by payment date · ${synced(ctx)}`);
   const topMode = inv.paymentModes[0];
@@ -652,7 +906,7 @@ function executionsSlide(ctx: DeckContext, e: ExecutionDeepDive): ShapeWriter {
   w.kpis(KPI_Y, [
     { value: fmtInt(e.total), label: "Total executions" },
     { value: fmtInt(e.completed), label: "Completed" },
-    { value: fmtInt(e.failed), label: `Failed (${pct(e.failureRate)} of runs)`, alert: e.failed > 0 },
+    { value: fmtInt(e.failed), label: `Failed (${pct(e.failureRate, 0)} of runs that executed)`, alert: e.failed > 0 },
     { value: fmtInt(e.skipped), label: "Skipped (conditions not met)" },
     { value: e.medianMs == null ? "—" : `${(e.medianMs / 1000).toFixed(1)} s`, label: `Median run time${e.p90Ms != null ? ` (p90 ${(e.p90Ms / 1000).toFixed(1)} s)` : ""}` },
   ]);
@@ -687,15 +941,42 @@ function executionsSlide(ctx: DeckContext, e: ExecutionDeepDive): ShapeWriter {
 
   const worst = [...e.perWorkflow].filter((f) => f.failed > 0).sort((x, y) => y.failed - x.failed)[0];
   const topError = e.topErrors[0];
-  w.insight(
-    [
-      e.peakWeek && e.total ? `the busiest week (from ${fmtDate(new Date(e.peakWeek.weekStart))}) had ${fmtInt(e.peakWeek.total)} runs — ${pct(e.peakWeek.total / e.total, 0)} of the window` : null,
-      worst ? `"${worst.name}" failed ${fmtInt(worst.failed)} times (${pct(worst.failureRate, 0)} of its runs)` : "no workflow runs failed",
-      topError ? `most common failure: "${topError.message}" (${fmtInt(topError.count)} of ${fmtInt(e.errorSampleSize)} failed runs sampled)` : null,
-    ]
-      .filter(Boolean)
-      .join("; ")
-      .replace(/^./, (c) => c.toUpperCase()) + "."
+  const skippedShare = e.total ? e.skipped / e.total : 0;
+  w.keyCallouts(
+    co([
+      worst &&
+        e.failed >= 10 && {
+          tone: "risk",
+          headline: `"${truncate(worst.name, 40)}" causes ${pct0(worst.failed / e.failed)} of ${fmtInt(e.failed)} failed runs`,
+          detail: `it fails ${pct0(worst.failureRate)} of the time — fixing this one workflow removes most failures.`,
+          score: 76,
+          area: "Automation",
+        },
+      topError &&
+        e.errorSampleSize > 0 && {
+          tone: "risk",
+          headline: `Most common error: "${truncate(topError.message, 50)}"`,
+          detail: `${fmtInt(topError.count)} of ${fmtInt(e.errorSampleSize)} sampled failures${/permission|allowed|access/i.test(topError.message) ? " — a permissions issue on the workflow's user, usually a quick fix" : /limit/i.test(topError.message) ? " — the account is hitting an execution limit" : ""}.`,
+          score: 60,
+          area: "Automation",
+        },
+      e.failed === 0 &&
+        e.completed > 0 && {
+          tone: "win",
+          headline: `${fmtInt(e.completed)} workflow runs, none failed`,
+          detail: "automations are running cleanly.",
+          score: 50,
+          area: "Automation",
+        },
+      skippedShare >= 0.5 && {
+        tone: "watch",
+        headline: `${pct0(skippedShare)} of runs were skipped (${fmtInt(e.skipped)})`,
+        detail: "triggers fire far more often than conditions match — tightening trigger filters cuts noise and execution usage.",
+        score: 44,
+        area: "Automation",
+      },
+    ]),
+    e.total ? `${fmtInt(e.total)} workflow runs in the window.` : "No workflow runs in this window."
   );
   w.footer(`Source: Zuper Workflow Builder execution history (exact counts) · failure rate excludes skipped runs · run time from ${fmtInt(Math.min(e.completed, 1000))} completed runs · ${synced(ctx)}`);
   w.notes = {
@@ -732,25 +1013,57 @@ export interface ModuleDeckInput {
   workflowSummary: WorkflowSummary;
   /** Path of the generated automation slide, so executions can follow it. */
   automationSlidePath: string;
+  shared: SharedDeckData;
+}
+
+// ---- Top call-outs (executive summary) ---------------------------------------------------------
+
+const TONE_FILL: Record<Callout["tone"], string> = { win: "E7F6E7", risk: "FBE9E7", opportunity: "FFF0E6", watch: "F1F1F1" };
+const TONE_INK: Record<Callout["tone"], string> = { win: "0B7A0B", risk: "B5271C", opportunity: "C03D00", watch: "4B5563" };
+const TONE_WORD: Record<Callout["tone"], string> = { win: "WIN", risk: "RISK", opportunity: "OPPORTUNITY", watch: "WATCH" };
+
+function topCalloutsSlide(ctx: DeckContext, top: Callout[]): ShapeWriter {
+  const w = new ShapeWriter();
+  w.header(`Top Call-outs — ${truncate(ctx.customerName, 40)}`, `The findings that matter most, ${periodText(ctx.range)}  ·  details on the slides that follow`);
+  const cols = 2;
+  const gap = 150000;
+  const cw = (CONTENT_W - gap) / cols;
+  const y0 = 1300000;
+  const ch = 1420000;
+  top.slice(0, 6).forEach((c, i) => {
+    const x = CONTENT_X + (i % cols) * (cw + gap);
+    const y = y0 + Math.floor(i / cols) * (ch + 120000);
+    w.rect(x, y, cw, ch, COLORS.white, { radius: 6000, border: COLORS.border });
+    w.rect(x + 160000, y + 150000, 1350000, 260000, TONE_FILL[c.tone], { radius: 50000 });
+    w.text(x + 160000, y + 150000, 1350000, 260000, run(TONE_WORD[c.tone], { sz: 800, color: TONE_INK[c.tone], bold: true }), { algn: "ctr", anchor: "ctr", wrap: "none" });
+    w.text(x + 1600000, y + 150000, cw - 1760000, 260000, run(c.area.toUpperCase(), { sz: 800, color: COLORS.faint, bold: true }), { anchor: "ctr", wrap: "none" });
+    w.text(x + 160000, y + 500000, cw - 320000, 420000, run(c.headline, { sz: 1250, color: COLORS.ink, bold: true }));
+    w.text(x + 160000, y + 930000, cw - 320000, 440000, run(c.detail.replace(/^./, (s) => s.toUpperCase()), { sz: 950, color: COLORS.muted }));
+  });
+  if (!top.length) w.empty({ x: CONTENT_X, y: y0, cx: CONTENT_W, cy: 4400000 }, "Not enough synced data to rank findings — run Sync from Zuper first.");
+  w.footer("Ranked by materiality across every slide in this deck · each finding is repeated, with its definition, on its own slide and in the speaker notes");
+  w.notes = {
+    purpose: "The executive summary: the handful of findings worth saying out loud, ranked across every area of the account.",
+    callouts: top.map((c) => `${TONE_WORD[c.tone]} (${c.area}): ${c.headline} — ${c.detail}`),
+    talkingPoints: [
+      "Open with the wins, then the one or two risks that need a decision, then the opportunities you'll propose on the priorities slide.",
+      "Every number here is on its own slide later — use those slides if the customer wants the detail.",
+    ],
+    caveats: ["Ranking is by a fixed materiality score (e.g. money at stake, share of work affected), not by AI.", syncLine(ctx)],
+  };
+  return w;
 }
 
 /** Computes every module's metrics and splices the deep-dive slides into their template sections. */
 export async function insertModuleSlides(zip: JSZip, input: ModuleDeckInput): Promise<void> {
-  const { customerId, range } = input;
-  const [sync, jobs, accounts, team, projects, quotes, invoices, exec] = await Promise.all([
-    computeSyncInfo(customerId, range),
-    computeJobDeepDive(customerId, range),
+  const { customerId, range, shared } = input;
+  const { sync, jobsDeep: jobs, quotesDeep: quotes, exec, catalog, delivery } = shared;
+  const [accounts, team, projects, invoices, portalPay, coverage] = await Promise.all([
     computeAccountsDeepDive(customerId, range),
     computeWorkforceDeepDive(customerId, range),
     computeProjectsDeepDive(customerId, range),
-    computeQuoteDeepDive(customerId, range),
     computeInvoiceDeepDive(customerId, range),
-    computeExecutionDeepDive(customerId, range),
-  ]);
-  const [delivery, portalPay, catalog, coverage] = await Promise.all([
-    computeJobServiceDelivery(customerId, range),
     computePortalAndPay(customerId, range),
-    computeCatalogAnalyses(customerId, range),
     computeCoverage(customerId),
   ]);
   const ctx: DeckContext = { customerName: input.customerName, range, sync };
@@ -758,12 +1071,13 @@ export async function insertModuleSlides(zip: JSZip, input: ModuleDeckInput): Pr
 
   // Template anchors: 12 = "Business KPI - Highlights" divider, 14 = Job Performance,
   // 15 = Daily Operations, 17 = Quote quarterly, 18 = Invoice quarterly.
-  await insertGeneratedSlide(zip, "ppt/slides/slide12.xml", scopeSlide(ctx, scopeRows(jobs, input.usage, accounts, team, projects, quotes, invoices, input.workflowSummary, exec)));
+  const scope = await insertGeneratedSlide(zip, "ppt/slides/slide12.xml", scopeSlide(ctx, scopeRows(jobs, input.usage, accounts, team, projects, quotes, invoices, input.workflowSummary, exec)));
   const volume = await insertGeneratedSlide(zip, "ppt/slides/slide14.xml", jobsVolumeSlide(ctx, jobs));
   const lifecycle = await insertGeneratedSlide(zip, volume, jobsLifecycleSlide(ctx, jobs));
   await insertChain(zip, lifecycle, [jobServiceSlide(cctx, delivery), timeOnSiteSlide(cctx, delivery)]);
   let after = await insertGeneratedSlide(zip, "ppt/slides/slide15.xml", accountsSlide(ctx, accounts));
-  after = await insertGeneratedSlide(zip, after, workforceSlide(ctx, team, jobs.created));
+  const tl = delivery.timeOnSite;
+  after = await insertGeneratedSlide(zip, after, workforceSlide(ctx, team, jobs.created, tl ? { entries: tl.entries, hours: tl.hours, people: tl.people.length } : null));
   if (projects.total > 0) await insertGeneratedSlide(zip, after, projectsSlide(ctx, projects));
   await insertGeneratedSlide(zip, "ppt/slides/slide17.xml", quotesSlide(ctx, quotes));
   const invoiceDeepDive = await insertGeneratedSlide(zip, "ppt/slides/slide18.xml", invoicesSlide(ctx, invoices));
@@ -773,9 +1087,17 @@ export async function insertModuleSlides(zip: JSZip, input: ModuleDeckInput): Pr
   const executions = await insertGeneratedSlide(zip, input.automationSlidePath, executionsSlide(ctx, exec));
   const byKey = new Map(catalog.map((m) => [m.key, m]));
   const SHOWN_ELSEWHERE = new Set(["job_timelogs", "unscheduled_jobs", "organizations_portal", "connect_calls", "connect_sms", "payment_requests"]);
+  const quotesTotal = quotes.count;
+  const jobsAllTime = jobs.created;
+  const own = catalog.filter((m) => !SHOWN_ELSEWHERE.has(m.key) && !SETUP_MODULES.has(m.key));
+  const setup = catalog.filter((m) => SETUP_MODULES.has(m.key));
   await insertChain(zip, executions, [
     connectSlide(cctx, byKey.get("connect_calls"), byKey.get("connect_sms"), coverage),
-    ...catalog.filter((m) => !SHOWN_ELSEWHERE.has(m.key)).map((m) => moduleSlide(cctx, m)),
+    ...own.map((m) => moduleSlide(cctx, m, { quotesInPeriod: quotesTotal, jobsInPeriod: jobsAllTime })),
+    setupSlide(cctx, setup),
     ...coverageSlides(cctx, coverage),
   ]);
+
+  // Executive summary, placed right after the scope slide once every slide's call-outs exist.
+  await insertGeneratedSlide(zip, scope, topCalloutsSlide(ctx, topAcross(collectedCallouts(zip), 6, 2)));
 }
