@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/db";
 import type { DateRange, JobStatusEntry } from "@/lib/zuper/modules";
+import { classifyInvoice, classifyQuote, isSentQuote } from "./classify";
 
 // ---------------------------------------------------------------------------
 // Per-module deep-dive metrics for the generated EBR/QBR slides. Deterministic —
@@ -53,6 +54,36 @@ export async function computeSyncInfo(customerId: string, range: DateRange): Pro
     periodEnd: run?.periodEnd ?? null,
     notes: run?.errorMessage ?? null,
     periodOutsideSync: !run || run.periodStart > range.start || run.periodEnd < range.end,
+  };
+}
+
+/** Earliest record per module in the synced data — lists pull full history, so these are the
+ * account's first recorded use of each area of Zuper (unless records were deleted or imported). */
+export interface AccountActivityDates {
+  firstJob: Date | null;
+  firstQuote: Date | null;
+  firstInvoice: Date | null;
+  firstPayment: Date | null;
+  firstWorkflow: Date | null;
+  firstEndCustomer: Date | null;
+}
+
+export async function computeAccountActivityDates(customerId: string): Promise<AccountActivityDates> {
+  const [job, quote, invoice, payment, workflow, endCustomer] = await Promise.all([
+    prisma.job.aggregate({ where: { customerId }, _min: { createdAt: true } }),
+    prisma.quote.aggregate({ where: { customerId }, _min: { estimateAt: true } }),
+    prisma.invoice.aggregate({ where: { customerId }, _min: { issuedAt: true } }),
+    prisma.payment.aggregate({ where: { customerId }, _min: { paidAt: true } }),
+    prisma.workflow.aggregate({ where: { customerId }, _min: { createdAt: true } }),
+    prisma.endCustomerLedger.aggregate({ where: { customerId }, _min: { createdInZuperAt: true } }),
+  ]);
+  return {
+    firstJob: job._min.createdAt,
+    firstQuote: quote._min.estimateAt,
+    firstInvoice: invoice._min.issuedAt,
+    firstPayment: payment._min.paidAt,
+    firstWorkflow: workflow._min.createdAt,
+    firstEndCustomer: endCustomer._min.createdInZuperAt,
   };
 }
 
@@ -326,7 +357,10 @@ export async function computeProjectsDeepDive(customerId: string, range: DateRan
 // ---- Invoices & collections --------------------------------------------------
 
 export interface InvoiceDeepDive {
+  /** Non-voided invoices dated in the period. */
   count: number;
+  /** Voided / canceled / archived invoices in the period — excluded from every amount. */
+  voided: number;
   invoiced: number;
   collected: number;
   outstanding: number;
@@ -360,13 +394,18 @@ export async function computeInvoiceDeepDive(customerId: string, range: DateRang
   let onTime = 0;
   let withDue = 0;
 
+  const billable = invoices.filter(
+    (inv) => classifyInvoice({ status: inv.status, amount: Number(inv.amount), amountPaid: Number(inv.amountPaid), isPaid: inv.isPaid }) !== "void"
+  );
   for (const inv of invoices) {
     const amount = Number(inv.amount);
-    const due = amount - Number(inv.amountPaid);
+    const isVoid = classifyInvoice({ status: inv.status, amount, amountPaid: Number(inv.amountPaid), isPaid: inv.isPaid }) === "void";
     const s = status.get(inv.status) ?? { count: 0, amount: 0 };
     s.count += 1;
     s.amount += amount;
     status.set(inv.status, s);
+    if (isVoid) continue;
+    const due = amount - Number(inv.amountPaid);
     if (due > 0.005) {
       const daysPast = inv.dueAt ? (now - inv.dueAt.getTime()) / DAY_MS : 0;
       const b = buckets.find((x) => x.test(daysPast))!;
@@ -390,11 +429,12 @@ export async function computeInvoiceDeepDive(customerId: string, range: DateRang
     if (p.paymentModeType === "ONLINE") online += amount;
   }
   const paymentsTotal = payments.reduce((s, p) => s + Number(p.amount), 0);
-  const invoiced = invoices.reduce((s, i) => s + Number(i.amount), 0);
-  const collected = invoices.reduce((s, i) => s + Number(i.amountPaid), 0);
+  const invoiced = billable.reduce((s, i) => s + Number(i.amount), 0);
+  const collected = billable.reduce((s, i) => s + Math.min(Number(i.amountPaid), Number(i.amount)), 0);
 
   return {
-    count: invoices.length,
+    count: billable.length,
+    voided: invoices.length - billable.length,
     invoiced,
     collected,
     outstanding: invoiced - collected,
@@ -413,6 +453,8 @@ export async function computeInvoiceDeepDive(customerId: string, range: DateRang
 
 export interface QuoteDeepDive {
   count: number;
+  /** Quotes that left draft — the conversion-rate denominator. */
+  sent: number;
   value: number;
   byStatus: { name: string; count: number; value: number }[];
   convertedCount: number;
@@ -436,14 +478,17 @@ export async function computeQuoteDeepDive(customerId: string, range: DateRange)
     const accepted = q.acceptedAt ?? q.convertedAt;
     if (accepted) toAccept.push((accepted.getTime() - (q.sentAt ?? q.estimateAt).getTime()) / DAY_MS);
   }
-  const converted = quotes.filter((q) => q.isConverted || /approv|accept/i.test(q.status));
+  const outcomes = quotes.map((q) => classifyQuote(q));
+  const converted = quotes.filter((_, i) => outcomes[i] === "accepted");
+  const sent = outcomes.filter(isSentQuote).length;
   return {
     count: quotes.length,
+    sent,
     value: quotes.reduce((s, q) => s + Number(q.value), 0),
     byStatus: [...status.entries()].map(([name, v]) => ({ name, ...v })).sort((a, b) => b.count - a.count),
     convertedCount: converted.length,
     convertedValue: converted.reduce((s, q) => s + Number(q.value), 0),
-    conversionRate: quotes.length ? converted.length / quotes.length : 0,
+    conversionRate: sent ? converted.length / sent : 0,
     medianDaysToAccept: median(toAccept.filter((d) => d >= 0)),
     acceptSample: toAccept.length,
     expiredOpen: quotes.filter((q) => q.isExpired && !q.isConverted).length,

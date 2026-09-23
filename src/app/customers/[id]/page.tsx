@@ -38,6 +38,7 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
   const [period, setPeriod] = useState(defaultPeriod());
   const [syncing, setSyncing] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
+  const [syncStage, setSyncStage] = useState<string | null>(null);
   const [metrics, setMetrics] = useState<any | null>(null);
   const [loadingMetrics, setLoadingMetrics] = useState(false);
   const [generatingReport, setGeneratingReport] = useState(false);
@@ -93,18 +94,42 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
   async function runSync() {
     setSyncing(true);
     setSyncError(null);
+    setSyncStage("Step 1 of 2: core modules (jobs, quotes, invoices, payments, customers, team, workflows)…");
+    const body = { apiKey, periodStart: period.start, periodEnd: period.end };
     const res = await fetch(`/api/customers/${id}/sync`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ apiKey, periodStart: period.start, periodEnd: period.end }),
+      body: JSON.stringify(body),
     });
-    setSyncing(false);
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
       setSyncError(data.error ?? "Sync failed");
+      setSyncing(false);
+      setSyncStage(null);
       await loadCustomer();
       return;
     }
+
+    // Step 2: every other module Zuper exposes, in chunks that each fit the server time limit.
+    let startIndex: number | null = 0;
+    let found = 0;
+    while (startIndex != null) {
+      setSyncStage(`Step 2 of 2: all other Zuper modules (${startIndex} done${found ? `, ${found} with data` : ""})…`);
+      const r: Response = await fetch(`/api/customers/${id}/sync/catalog`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...body, startIndex }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        setSyncError(`Core sync finished, but pulling the other modules failed: ${data.error ?? r.status}. Re-sync to retry.`);
+        break;
+      }
+      found += (data.results ?? []).filter((x: { status: string }) => x.status === "ok").length;
+      startIndex = data.nextIndex;
+    }
+    setSyncing(false);
+    setSyncStage(null);
     setApiKey("");
     await loadCustomer();
     await loadMetrics();
@@ -244,7 +269,8 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
               {loadingMetrics ? "Loading…" : "Load metrics"}
             </button>
           </div>
-          {!apiKey && <p className="text-sm text-amber-600">Enter the Zuper API key above to sync.</p>}
+          {syncStage && <p className="text-sm text-neutral-500">{syncStage}</p>}
+          {!apiKey && !syncing && <p className="text-sm text-amber-600">Enter the Zuper API key above to sync.</p>}
           {syncError && <p className="text-sm text-red-500">{syncError}</p>}
           {latestSync && (
             <p className="text-sm text-neutral-500">

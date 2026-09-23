@@ -1,5 +1,6 @@
 import type JSZip from "jszip";
 import { buildChartXml, chartFrameXml, type ChartSpec } from "./nativeChart";
+import { setSlideNotes, type SlideNotes } from "./slideNotes";
 
 // ---------------------------------------------------------------------------
 // Shared plumbing for slides that aren't in templates/ebr-template.pptx but are
@@ -55,6 +56,8 @@ export class ShapeWriter {
   readonly shapes: string[] = [];
   /** Native charts; each shape entry holds a {{CHART_n}} rId placeholder resolved in insertGeneratedSlide. */
   readonly charts: ChartSpec[] = [];
+  /** Speaker notes written alongside the slide (see slideNotes.ts). */
+  notes?: SlideNotes;
 
   chart(x: number, y: number, cx: number, cy: number, spec: ChartSpec) {
     const n = this.charts.push(spec) - 1;
@@ -229,5 +232,6 @@ export async function insertGeneratedSlide(zip: JSZip, afterSlide: string, shape
       `<Override PartName="/ppt/slides/${slideName}" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>${chartOverrides.join("")}</Types>`
     )
   );
+  if (shapes.notes) await setSlideNotes(zip, `ppt/slides/${slideName}`, shapes.notes);
   return `ppt/slides/${slideName}`;
 }

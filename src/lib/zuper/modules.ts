@@ -1,4 +1,5 @@
 import { ZuperClient } from "./client";
+import { compactRecord, type CompactRecord } from "./compact";
 
 export interface DateRange {
   start: Date;
@@ -25,6 +26,8 @@ export interface NormalizedJob {
   currentStatusType: string | null;
   organizationUid: string | null;
   statusHistory: JobStatusEntry[];
+  /** Every other field, compacted — see lib/zuper/compact.ts. */
+  extra: CompactRecord;
 }
 
 export interface JobStatusEntry {
@@ -117,6 +120,8 @@ export interface NormalizedPayment {
   paymentModeType: string | null;
   actionModule: string | null;
   status: string | null;
+  source: string | null;
+  paymentType: string | null;
   zuperInvoiceId: string | null;
   zuperPayUsed: boolean;
   paidAt: Date;
@@ -267,6 +272,8 @@ function normalizeJob(raw: Record<string, any>): NormalizedJob {
       at: s.created_at,
       minutes: typeof s.time_on_status === "number" ? s.time_on_status : null,
     })),
+    // Already captured above (status history, line items, assignees) — leave them out of `extra`.
+    extra: compactRecord(Object.fromEntries(Object.entries(raw).filter(([k]) => !["job_status", "products", "custom_fields_meta"].includes(k)))),
   };
 }
 
@@ -306,19 +313,24 @@ export const propertiesModule = {
   },
 };
 
-/** UNVERIFIED shape: every account probed had zero projects (see prisma Project comment). */
+/** Verified 2026-09-23 (Xterior): project_status is the status *history* array
+ * [{project_status_name, project_status_type, created_at, ...}]; project_current_status
+ * holds the current one when present. */
 export const projectsModule = {
   key: "projects" as const,
   async *fetch(client: ZuperClient) {
     for await (const page of client.paginate<Record<string, any>>("projects")) {
-      yield page.map(
-        (raw): NormalizedProject => ({
+      yield page.map((raw): NormalizedProject => {
+        const history = Array.isArray(raw.project_status) ? (raw.project_status as Record<string, any>[]) : [];
+        const current = raw.project_current_status ?? history[history.length - 1];
+        const status = typeof current === "string" ? current : (current?.project_status_name ?? current?.status_name ?? null);
+        return {
           zuperProjectId: String(raw.project_uid ?? raw.id),
           name: raw.project_name ?? raw.project_title ?? raw.name ?? "Unnamed project",
-          status: raw.current_project_status?.status_name ?? raw.project_status?.status_name ?? raw.project_status ?? raw.status ?? null,
-          createdAt: new Date(raw.created_at),
-        })
-      );
+          status: typeof status === "string" ? status : null,
+          createdAt: new Date(raw.created_at ?? raw.updated_at ?? Date.now()),
+        };
+      });
     }
   },
 };
@@ -427,6 +439,8 @@ function normalizePayment(raw: Record<string, any>): NormalizedPayment {
     paymentModeType,
     actionModule: raw.action_module ?? null,
     status: raw.status ?? null,
+    source: typeof raw.source === "string" ? raw.source : (raw.source?.source_name ?? null),
+    paymentType: typeof raw.type === "string" ? raw.type : null,
     zuperInvoiceId: raw.invoice?.invoice_uid ?? null,
     // Zuper Pay itself isn't distinguishable in this response; ONLINE vs OFFLINE
     // payment_mode_type is the closest available proxy for "collected digitally".

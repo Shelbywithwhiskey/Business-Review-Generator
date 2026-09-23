@@ -1,42 +1,27 @@
 import { prisma } from "@/lib/db";
 import type { DateRange } from "@/lib/zuper/modules";
+import { classifyInvoice, classifyQuote, isSentQuote } from "./classify";
 
 // ---------------------------------------------------------------------------
 // Metrics specific to the EBR/QBR PPTX template (see lib/pptx/*). Deterministic,
-// no AI — same rule as lib/analytics.ts. Quote/invoice "status" bucketing below
-// is best-effort against the documented enum (see prisma/schema.prisma comments
-// on Quote.status/Invoice.status) since exact real string values for every
-// account haven't been enumerated; matching is done by substring so minor
-// variations (case, wording) still classify correctly.
+// no AI — same rule as lib/analytics.ts. Quote/invoice outcomes come from the
+// shared rules in ./classify so every slide agrees on what "accepted" and
+// "voided" mean.
 // ---------------------------------------------------------------------------
-
-type QuoteRow = { status: string; isConverted: boolean; isExpired: boolean; value: number };
-type InvoiceRow = { status: string; amount: number; amountPaid: number; isPaid: boolean; dueAt: Date | null };
-
-function classifyQuote(q: QuoteRow): "accepted" | "declined" | "archived" | "open" {
-  if (q.isConverted) return "accepted";
-  const s = q.status.toLowerCase();
-  if (s.includes("reject") || s.includes("declin")) return "declined";
-  if (q.isExpired || s.includes("expir") || s.includes("void") || s.includes("cancel") || s.includes("archiv")) {
-    return "archived";
-  }
-  return "open";
-}
-
-function classifyInvoice(inv: InvoiceRow): "fully_paid" | "partially_paid" | "open" | "archived" {
-  const s = inv.status.toLowerCase();
-  if (s.includes("void") || s.includes("cancel") || s.includes("archiv")) return "archived";
-  if (inv.isPaid || inv.amountPaid >= inv.amount) return "fully_paid";
-  if (inv.amountPaid > 0) return "partially_paid";
-  return "open";
-}
 
 export interface QuoteBreakdown {
   total: number;
   totalValue: number;
+  /** Quotes that left draft — the denominator for acceptance and decline rates. */
+  sent: number;
+  drafts: number;
+  /** rate = count ÷ sent quotes. */
   accepted: { count: number; value: number; rate: number };
+  /** rate = count ÷ sent quotes. */
   declined: { count: number; value: number; rate: number };
+  /** Awaiting response, plus drafts. rate = count ÷ all quotes. */
   open: { count: number; value: number; rate: number };
+  /** Canceled, archived or expired. rate = count ÷ all quotes. */
   archived: { count: number; value: number; rate: number };
 }
 
@@ -52,35 +37,50 @@ export async function computeQuoteBreakdown(customerId: string, range: DateRange
     archived: { count: 0, value: 0 },
   };
   let totalValue = 0;
+  let sent = 0;
+  let drafts = 0;
 
   for (const q of quotes) {
     const value = Number(q.value);
     totalValue += value;
-    const bucket = classifyQuote({ status: q.status, isConverted: q.isConverted, isExpired: q.isExpired, value });
+    const outcome = classifyQuote(q);
+    if (isSentQuote(outcome)) sent += 1;
+    else drafts += 1;
+    const bucket = outcome === "draft" ? "open" : outcome;
     buckets[bucket].count += 1;
     buckets[bucket].value += value;
   }
 
   const total = quotes.length;
-  const rate = (n: number) => (total ? n / total : 0);
+  const ofSent = (n: number) => (sent ? n / sent : 0);
+  const ofAll = (n: number) => (total ? n / total : 0);
   return {
     total,
     totalValue,
-    accepted: { ...buckets.accepted, rate: rate(buckets.accepted.count) },
-    declined: { ...buckets.declined, rate: rate(buckets.declined.count) },
-    open: { ...buckets.open, rate: rate(buckets.open.count) },
-    archived: { ...buckets.archived, rate: rate(buckets.archived.count) },
+    sent,
+    drafts,
+    accepted: { ...buckets.accepted, rate: ofSent(buckets.accepted.count) },
+    declined: { ...buckets.declined, rate: ofSent(buckets.declined.count) },
+    open: { ...buckets.open, rate: ofAll(buckets.open.count) },
+    archived: { ...buckets.archived, rate: ofAll(buckets.archived.count) },
   };
 }
 
 export interface InvoiceBreakdown {
+  /** All invoices dated in the period, including voided ones. */
   total: number;
+  /** Invoices that count toward value and collections (voided excluded). */
+  billable: number;
   totalValue: number;
   totalCollected: number;
   collectionRate: number;
+  /** rate = count ÷ billable invoices. */
   fullyPaid: { count: number; value: number; rate: number };
   partiallyPaid: { count: number; collected: number; outstanding: number };
-  open: { count: number; value: number; agedOver60Count: number; agedOver60Value: number };
+  open: { count: number; value: number };
+  /** Outstanding balance (open + partially paid) more than 60 days past its due date, as of today. */
+  agedOver60: { count: number; value: number };
+  /** Voided / canceled / archived — excluded from value and collection rate. rate = count ÷ all invoices. */
   archived: { count: number; value: number; rate: number };
 }
 
@@ -93,49 +93,54 @@ export async function computeInvoiceBreakdown(customerId: string, range: DateRan
   let totalCollected = 0;
   const fullyPaid = { count: 0, value: 0 };
   const partiallyPaid = { count: 0, collected: 0, outstanding: 0 };
-  const open = { count: 0, value: 0, agedOver60Count: 0, agedOver60Value: 0 };
+  const open = { count: 0, value: 0 };
+  const agedOver60 = { count: 0, value: 0 };
   const archived = { count: 0, value: 0 };
   const now = Date.now();
 
   for (const inv of invoices) {
     const amount = Number(inv.amount);
     const paid = Number(inv.amountPaid);
+    const bucket = classifyInvoice({ status: inv.status, amount, amountPaid: paid, isPaid: inv.isPaid });
+    if (bucket === "void") {
+      archived.count += 1;
+      archived.value += amount;
+      continue;
+    }
     totalValue += amount;
-    totalCollected += paid;
+    totalCollected += Math.min(paid, amount);
 
-    const bucket = classifyInvoice({ status: inv.status, amount, amountPaid: paid, isPaid: inv.isPaid, dueAt: inv.dueAt });
     if (bucket === "fully_paid") {
       fullyPaid.count += 1;
       fullyPaid.value += amount;
-    } else if (bucket === "partially_paid") {
+      continue;
+    }
+    if (bucket === "partially_paid") {
       partiallyPaid.count += 1;
       partiallyPaid.collected += paid;
       partiallyPaid.outstanding += amount - paid;
-    } else if (bucket === "archived") {
-      archived.count += 1;
-      archived.value += amount;
     } else {
       open.count += 1;
       open.value += amount;
-      if (inv.dueAt) {
-        const daysPastDue = (now - inv.dueAt.getTime()) / (1000 * 60 * 60 * 24);
-        if (daysPastDue > 60) {
-          open.agedOver60Count += 1;
-          open.agedOver60Value += amount - paid;
-        }
-      }
+    }
+    if (inv.dueAt && (now - inv.dueAt.getTime()) / 864e5 > 60) {
+      agedOver60.count += 1;
+      agedOver60.value += amount - paid;
     }
   }
 
   const total = invoices.length;
+  const billable = total - archived.count;
   return {
     total,
+    billable,
     totalValue,
     totalCollected,
     collectionRate: totalValue ? totalCollected / totalValue : 0,
-    fullyPaid: { ...fullyPaid, rate: total ? fullyPaid.count / total : 0 },
+    fullyPaid: { ...fullyPaid, rate: billable ? fullyPaid.count / billable : 0 },
     partiallyPaid,
     open,
+    agedOver60,
     archived: { ...archived, rate: total ? archived.count / total : 0 },
   };
 }
@@ -196,6 +201,20 @@ export interface RecommendationEvidence {
   totalWorkflowCount: number;
   workflowsNeedingAttention: number;
   jobsTotal: number;
+  /** From Workflow Builder execution history (0 when not synced). */
+  workflowRunsFailed: number;
+  /** Failed ÷ (completed + failed) runs. */
+  workflowFailureRate: number;
+  topWorkflowError: string | null;
+  /** Jobs due in the period: completed on time ÷ eligible (null when jobs carry no deadline). */
+  onTimeRate?: number | null;
+  onTimeEligible?: number;
+  overdueOpenJobs?: number;
+  /** Completed jobs with an invoice attached ÷ completed jobs (null when not measurable). */
+  completedInvoicedRate?: number | null;
+  completedJobs?: number;
+  contractsExpiring90d?: number;
+  missedCalls?: number;
 }
 
 /**
@@ -205,6 +224,12 @@ export interface RecommendationEvidence {
  * than 4 signals fire. This is the fallback used verbatim when the AI engine is off,
  * and the only numeric grounding the AI engine is allowed to draw on when it's on.
  */
+function money(n: number): string {
+  if (Math.abs(n) >= 1_000_000) return `$${(n / 1_000_000).toFixed(2)}M`;
+  if (Math.abs(n) >= 1_000) return `$${(n / 1_000).toFixed(1)}K`;
+  return `$${Math.round(n).toLocaleString("en-US")}`;
+}
+
 export function computeRecommendationSignals(evidence: RecommendationEvidence): RecommendationSignal[] {
   const signals: RecommendationSignal[] = [];
 
@@ -212,21 +237,61 @@ export function computeRecommendationSignals(evidence: RecommendationEvidence): 
     signals.push({
       key: "quote_conversion_low",
       title: "Improve Quote Follow-Up",
-      detail: `Only ${(evidence.quotesAcceptanceRate * 100).toFixed(0)}% of ${evidence.quotesTotal} quotes converted this period, leaving $${(evidence.quotesOpenValue / 1_000_000).toFixed(2)}M in open pipeline value — tighter follow-up and tiered (Good-Better-Best) proposals are the fastest lever here.`,
+      detail: `Only ${(evidence.quotesAcceptanceRate * 100).toFixed(0)}% of ${evidence.quotesTotal.toLocaleString("en-US")} sent quotes were accepted this period, with ${money(evidence.quotesOpenValue)} still open — tighter follow-up and tiered (Good-Better-Best) proposals are the fastest lever here.`,
     });
   }
 
   if (evidence.invoicesAgedOver60Value > 5000) {
     signals.push({
       key: "invoice_aging_high",
-      title: "Turn On Zuper Pay",
-      detail: `$${(evidence.invoicesAgedOver60Value / 1_000_000).toFixed(2)}M across ${evidence.invoicesAgedOver60Count} invoice(s) is aged over 60 days — Zuper Pay's Tap-to-Pay and payment links speed up collections directly from the invoice.`,
+      title: "Collect Overdue Invoices",
+      detail: `${money(evidence.invoicesAgedOver60Value)} across ${evidence.invoicesAgedOver60Count} invoice(s) is more than 60 days past due — Zuper Pay payment links on every reminder, or AR Agent working the overdue list, shorten collection.`,
     });
   } else if (evidence.paymentsTotalValue > 20000 && evidence.onlinePaymentShare < 0.2) {
     signals.push({
       key: "zuper_pay_opportunity",
-      title: "Turn On Zuper Pay",
-      detail: `$${(evidence.paymentsTotalValue / 1_000_000).toFixed(2)}M in payments were collected this period with only ${(evidence.onlinePaymentShare * 100).toFixed(0)}% paid digitally — Zuper Pay consolidates this with lower fees and faster payout.`,
+      title: "Move Payments Online",
+      detail: `${money(evidence.paymentsTotalValue)} in payments were collected this period with only ${(evidence.onlinePaymentShare * 100).toFixed(0)}% paid online — Zuper Pay (Tap to Pay, payment links, card on file) brings collection into the same system as the invoice.`,
+    });
+  }
+
+  if (evidence.onTimeRate != null && (evidence.onTimeEligible ?? 0) >= 20 && evidence.onTimeRate < 0.7) {
+    signals.push({
+      key: "on_time_low",
+      title: "Lift On-Time Completion",
+      detail: `${(evidence.onTimeRate * 100).toFixed(0)}% of ${(evidence.onTimeEligible ?? 0).toLocaleString("en-US")} jobs due this period were completed by their deadline, with ${(evidence.overdueOpenJobs ?? 0).toLocaleString("en-US")} still open past due — dispatch board reviews and status-based alerts in Workflow Builder keep late jobs visible.`,
+    });
+  }
+
+  if (evidence.completedInvoicedRate != null && (evidence.completedJobs ?? 0) >= 20 && evidence.completedInvoicedRate < 0.7) {
+    signals.push({
+      key: "completed_not_invoiced",
+      title: "Invoice Work on Completion",
+      detail: `Only ${(evidence.completedInvoicedRate * 100).toFixed(0)}% of ${(evidence.completedJobs ?? 0).toLocaleString("en-US")} completed jobs have an invoice attached in Zuper — auto-creating the invoice when a job completes closes the gap between finishing work and billing it.`,
+    });
+  }
+
+  if ((evidence.contractsExpiring90d ?? 0) > 0) {
+    signals.push({
+      key: "contracts_expiring",
+      title: "Renew Expiring Contracts",
+      detail: `${evidence.contractsExpiring90d} service contract(s) expire in the next 90 days — a renewal workflow and reminder sequence protects that recurring revenue.`,
+    });
+  }
+
+  if ((evidence.missedCalls ?? 0) >= 10) {
+    signals.push({
+      key: "missed_calls",
+      title: "Answer Every Call",
+      detail: `${evidence.missedCalls} calls through Zuper Connect were missed or went unanswered — CSR Agent answers overflow and after-hours calls and books the work.`,
+    });
+  }
+
+  if (evidence.workflowRunsFailed >= 20 && evidence.workflowFailureRate >= 0.05) {
+    signals.push({
+      key: "workflow_runs_failing",
+      title: "Fix Failing Automations",
+      detail: `${evidence.workflowRunsFailed.toLocaleString("en-US")} workflow runs failed (${(evidence.workflowFailureRate * 100).toFixed(0)}% of runs that executed)${evidence.topWorkflowError ? `, most often "${evidence.topWorkflowError}"` : ""} — each failed run is a step the team has to catch and do by hand.`,
     });
   }
 
@@ -396,6 +461,7 @@ export interface FootprintComparison {
   quoteValue: number;
   invoiceValue: number;
   propertiesCount: number;
+  endCustomerCount: number;
   totalUserIdentities: number;
   activeUserCount: number;
   currentLabel: string;
@@ -404,11 +470,11 @@ export interface FootprintComparison {
 
 /**
  * Compares "this calendar year to date" against "the prior full calendar year" —
- * matches the template's "2026 YTD vs full-year 2025" framing. propertiesCount is
- * approximated from the synced end-customer ledger (Zuper has no dedicated
- * Properties module wired up yet); totalUserIdentities/activeUserCount come from
- * all synced Technician rows for the report period, not a licensed-seat count
- * (that's a billing concept, not exposed via the customer's own API key).
+ * matches the template's "YTD vs full prior year" framing. propertiesCount is the
+ * synced Property count (GET /property); endCustomerCount is reported separately.
+ * totalUserIdentities/activeUserCount come from all synced Technician rows for the
+ * report period, not a licensed-seat count (that's a billing concept, not exposed
+ * via the customer's own API key).
  */
 export async function computeFootprintComparison(customerId: string, range: DateRange): Promise<FootprintComparison> {
   const currentYearStart = new Date(Date.UTC(range.end.getUTCFullYear(), 0, 1));
@@ -423,8 +489,9 @@ export async function computeFootprintComparison(customerId: string, range: Date
     currentInvoices,
     priorInvoices,
     quoteValueAgg,
-    invoiceValueAgg,
+    periodInvoices,
     propertiesCount,
+    endCustomerCount,
     technicians,
   ] = await Promise.all([
     prisma.job.count({ where: { customerId, createdAt: { gte: currentYearStart, lte: range.end } } }),
@@ -437,10 +504,11 @@ export async function computeFootprintComparison(customerId: string, range: Date
       where: { customerId, estimateAt: { gte: range.start, lte: range.end } },
       _sum: { value: true },
     }),
-    prisma.invoice.aggregate({
+    prisma.invoice.findMany({
       where: { customerId, issuedAt: { gte: range.start, lte: range.end } },
-      _sum: { amount: true },
+      select: { amount: true, amountPaid: true, status: true, isPaid: true },
     }),
+    prisma.property.count({ where: { customerId } }),
     prisma.endCustomerLedger.count({ where: { customerId } }),
     prisma.technician.findMany({
       where: { customerId, periodStart: range.start, periodEnd: range.end },
@@ -456,8 +524,11 @@ export async function computeFootprintComparison(customerId: string, range: Date
     currentInvoices,
     priorInvoices,
     quoteValue: Number(quoteValueAgg._sum.value ?? 0),
-    invoiceValue: Number(invoiceValueAgg._sum.amount ?? 0),
+    invoiceValue: periodInvoices
+      .filter((inv) => classifyInvoice({ status: inv.status, amount: Number(inv.amount), amountPaid: Number(inv.amountPaid), isPaid: inv.isPaid }) !== "void")
+      .reduce((sum, inv) => sum + Number(inv.amount), 0),
     propertiesCount,
+    endCustomerCount,
     totalUserIdentities: technicians.length,
     activeUserCount: technicians.filter((t) => t.isActive).length,
     currentLabel: `${currentYearStart.getUTCFullYear()} YTD`,
@@ -469,6 +540,8 @@ export interface QuarterBucket {
   label: string;
   quotesAcceptedValue: number;
   quotesDeclinedValue: number;
+  /** Non-draft quotes dated in the quarter — the acceptance-rate denominator. */
+  quotesSent: number;
   acceptanceRatePct: number;
   invoicesInvoicedValue: number;
   invoicesCollectedValue: number;
@@ -505,39 +578,43 @@ export async function computeQuarterlySeries(
       }),
       prisma.invoice.findMany({
         where: { customerId, issuedAt: { gte: start, lt: end } },
-        select: { amount: true, amountPaid: true },
+        select: { amount: true, amountPaid: true, status: true, isPaid: true },
       }),
     ]);
 
+    // Same definitions as the period totals: acceptance = accepted ÷ sent (non-draft) quotes.
     let acceptedValue = 0;
     let declinedValue = 0;
     let acceptedCount = 0;
-    let decidedCount = 0; // accepted + declined, denominator for acceptance rate
+    let sentCount = 0;
     for (const q of quotes) {
       const value = Number(q.value);
-      const bucket = classifyQuote({ status: q.status, isConverted: q.isConverted, isExpired: q.isExpired, value });
-      if (bucket === "accepted") {
+      const outcome = classifyQuote(q);
+      if (isSentQuote(outcome)) sentCount += 1;
+      if (outcome === "accepted") {
         acceptedValue += value;
         acceptedCount += 1;
-        decidedCount += 1;
-      } else if (bucket === "declined") {
+      } else if (outcome === "declined") {
         declinedValue += value;
-        decidedCount += 1;
       }
     }
 
     let invoicedValue = 0;
     let collectedValue = 0;
     for (const inv of invoices) {
-      invoicedValue += Number(inv.amount);
-      collectedValue += Number(inv.amountPaid);
+      const amount = Number(inv.amount);
+      const paid = Number(inv.amountPaid);
+      if (classifyInvoice({ status: inv.status, amount, amountPaid: paid, isPaid: inv.isPaid }) === "void") continue;
+      invoicedValue += amount;
+      collectedValue += Math.min(paid, amount);
     }
 
     buckets.push({
-      label: quarterLabel(start),
+      label: `${quarterLabel(start)} ${String(start.getUTCFullYear()).slice(2)}`,
       quotesAcceptedValue: acceptedValue,
       quotesDeclinedValue: declinedValue,
-      acceptanceRatePct: decidedCount ? (acceptedCount / decidedCount) * 100 : 0,
+      quotesSent: sentCount,
+      acceptanceRatePct: sentCount ? (acceptedCount / sentCount) * 100 : 0,
       invoicesInvoicedValue: invoicedValue,
       invoicesCollectedValue: collectedValue,
       collectionRatePct: invoicedValue ? (collectedValue / invoicedValue) * 100 : 0,
@@ -549,8 +626,12 @@ export async function computeQuarterlySeries(
 
 export interface MonthBucket {
   label: string; // "Aug-2025"
+  /** Mean value of non-voided invoices dated in the month. */
   avgInvoiceValue: number;
+  invoiceCount: number;
+  /** Open, draft or declined quotes dated in the month. */
   unacceptedQuoteValue: number;
+  acceptedQuoteValue: number;
 }
 
 const MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -567,7 +648,7 @@ export async function computeMonthlySeries(customerId: string, range: DateRange,
     const [invoices, quotes] = await Promise.all([
       prisma.invoice.findMany({
         where: { customerId, issuedAt: { gte: start, lt: end } },
-        select: { amount: true },
+        select: { amount: true, amountPaid: true, status: true, isPaid: true },
       }),
       prisma.quote.findMany({
         where: { customerId, estimateAt: { gte: start, lt: end } },
@@ -575,20 +656,24 @@ export async function computeMonthlySeries(customerId: string, range: DateRange,
       }),
     ]);
 
-    const avgInvoiceValue = invoices.length
-      ? invoices.reduce((sum, inv) => sum + Number(inv.amount), 0) / invoices.length
-      : 0;
+    const billable = invoices.filter(
+      (inv) => classifyInvoice({ status: inv.status, amount: Number(inv.amount), amountPaid: Number(inv.amountPaid), isPaid: inv.isPaid }) !== "void"
+    );
+    const avgInvoiceValue = billable.length ? billable.reduce((sum, inv) => sum + Number(inv.amount), 0) / billable.length : 0;
 
+    let acceptedQuoteValue = 0;
     const unacceptedQuoteValue = quotes.reduce((sum, q) => {
-      const value = Number(q.value);
-      const bucket = classifyQuote({ status: q.status, isConverted: q.isConverted, isExpired: q.isExpired, value });
-      return bucket === "open" || bucket === "declined" ? sum + value : sum;
+      const outcome = classifyQuote(q);
+      if (outcome === "accepted") acceptedQuoteValue += Number(q.value);
+      return outcome === "open" || outcome === "draft" || outcome === "declined" ? sum + Number(q.value) : sum;
     }, 0);
 
     buckets.push({
       label: `${MONTH_ABBR[start.getUTCMonth()]}-${start.getUTCFullYear()}`,
       avgInvoiceValue,
+      invoiceCount: billable.length,
       unacceptedQuoteValue,
+      acceptedQuoteValue,
     });
   }
 

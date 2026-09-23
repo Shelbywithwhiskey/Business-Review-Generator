@@ -66,7 +66,16 @@ function dLbls(format: string, position: string | null, show: boolean): string {
   );
 }
 
-function axes(horizontal: boolean, format: string): string {
+/** Whole-number series with a small max get a step of 1, so the axis doesn't repeat rounded labels (0, 0, 1, 1…). */
+function integerStep(spec: ChartSpec, format: string): number | null {
+  if (format.includes(".")) return null;
+  const values = spec.series.flatMap((s) => s.values);
+  const stackedMax = Math.max(0, ...spec.categories.map((_, i) => spec.series.reduce((sum, s) => sum + (s.values[i] ?? 0), 0)));
+  const max = spec.kind === "stackedBar" || spec.kind === "stackedColumn" ? stackedMax : Math.max(0, ...values);
+  return values.every((v) => Number.isInteger(v)) && max <= 8 ? 1 : null;
+}
+
+function axes(horizontal: boolean, format: string, majorUnit: number | null = null): string {
   const catPos = horizontal ? "l" : "b";
   const valPos = horizontal ? "b" : "l";
   // Horizontal bars list the first category at the top (maxMin), matching ranked reading order.
@@ -78,7 +87,9 @@ function axes(horizontal: boolean, format: string): string {
     `<c:valAx><c:axId val="1002"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="${horizontal ? 1 : 0}"/>` +
     `<c:axPos val="${valPos}"/><c:majorGridlines><c:spPr><a:ln w="6350"><a:solidFill><a:srgbClr val="${GRID}"/></a:solidFill></a:ln></c:spPr></c:majorGridlines>` +
     `<c:numFmt formatCode="${esc(format)}" sourceLinked="0"/><c:majorTickMark val="none"/><c:minorTickMark val="none"/><c:tickLblPos val="nextTo"/>` +
-    `<c:spPr><a:ln><a:noFill/></a:ln></c:spPr>${txPr(800, MUTED)}<c:crossAx val="1001"/><c:crosses val="autoZero"/><c:crossBetween val="between"/></c:valAx>`
+    `<c:spPr><a:ln><a:noFill/></a:ln></c:spPr>${txPr(800, MUTED)}<c:crossAx val="1001"/><c:crosses val="autoZero"/><c:crossBetween val="between"/>` +
+    (majorUnit ? `<c:majorUnit val="${majorUnit}"/>` : "") +
+    `</c:valAx>`
   );
 }
 
@@ -110,7 +121,7 @@ function plot(spec: ChartSpec): string {
           `${dLbls(format, "t", show)}${cat}<c:val>${numLit(s.values, format)}</c:val><c:smooth val="0"/></c:ser>`
       )
       .join("");
-    return `<c:lineChart><c:grouping val="standard"/><c:varyColors val="0"/>${sers}<c:marker val="1"/><c:axId val="1001"/><c:axId val="1002"/></c:lineChart>${axes(false, format)}`;
+    return `<c:lineChart><c:grouping val="standard"/><c:varyColors val="0"/>${sers}<c:marker val="1"/><c:axId val="1001"/><c:axId val="1002"/></c:lineChart>${axes(false, format, integerStep(spec, format))}`;
   }
 
   const horizontal = spec.kind === "bar" || spec.kind === "stackedBar";
@@ -125,7 +136,7 @@ function plot(spec: ChartSpec): string {
   return (
     `<c:barChart><c:barDir val="${horizontal ? "bar" : "col"}"/><c:grouping val="${stacked ? "stacked" : "clustered"}"/><c:varyColors val="0"/>` +
     `${sers}<c:gapWidth val="${horizontal ? 45 : 60}"/>${stacked ? '<c:overlap val="100"/>' : spec.series.length > 1 ? '<c:overlap val="-10"/>' : ""}` +
-    `<c:axId val="1001"/><c:axId val="1002"/></c:barChart>${axes(horizontal, format)}`
+    `<c:axId val="1001"/><c:axId val="1002"/></c:barChart>${axes(horizontal, format, integerStep(spec, format))}`
   );
 }
 

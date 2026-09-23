@@ -86,5 +86,23 @@ export async function insertUsageSlide(zip: JSZip, usage: LineItemUsage, periodL
   drawCard(w, CARD_XS[2], "SERVICES", "services", usage.services);
   w.insight(usageInsight(usage));
   w.footer("Source: Zuper Jobs — parts, products & services added to jobs created in the period · ranked by number of jobs using each item");
+  const topOf = (u: LineItemTypeUsage, kind: string) =>
+    u.top[0] ? `Top ${kind}: ${u.top[0].name} — ${fmtInt(u.top[0].jobCount)} jobs, ${fmtMoneyCompact(u.top[0].revenue)}.` : null;
+  w.notes = {
+    purpose: "What the field team actually uses on jobs: parts, products and services added as job line items.",
+    callouts: [
+      `${fmtInt(usage.jobsWithLineItems)} of ${fmtInt(usage.jobsTotal)} jobs (${(usage.attachRate * 100).toFixed(1)}%) have parts, products or services on them.`,
+      ...[topOf(usage.services, "service"), topOf(usage.parts, "part"), topOf(usage.products, "product")].filter((x): x is string => Boolean(x)),
+      ...(usage.attachRate < 0.3 && usage.jobsTotal > 20
+        ? ["Most jobs have no line items — adding parts/services to jobs unlocks job costing, profitability and inventory reporting."]
+        : []),
+    ],
+    metrics: [
+      { label: "Amount per card", definition: "Sum of line-item totals (quantity × price) for that type on jobs created in the period.", source: "Zuper Jobs (products[] on each job)", evidence: "Observed activity" },
+      { label: "Items / jobs", definition: "Distinct items of that type, and the number of jobs using at least one.", source: "Zuper Jobs", evidence: "Observed activity" },
+      { label: "Top 5", definition: "Ranked by number of jobs using the item; the amount is its line-item total.", source: "Zuper Jobs", evidence: "Observed activity" },
+    ],
+    caveats: ["Line-item totals are what was put on the job, not necessarily what was invoiced or paid.", "Type (Parts / Product / Service) is as set on each product in Zuper."],
+  };
   return insertGeneratedSlide(zip, INSERT_AFTER, w);
 }

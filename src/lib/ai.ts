@@ -50,7 +50,10 @@ async function callGemini(systemInstruction: string, prompt: string, maxOutputTo
   const res = await ai.models.generateContent({
     model: GEMINI_MODEL,
     contents: prompt,
-    config: { systemInstruction, maxOutputTokens },
+    // Gemini 2.5 counts "thinking" tokens against maxOutputTokens, which truncated these short
+    // outputs (and silently fell back to templates). The inputs are pre-computed numbers — no
+    // reasoning budget is needed.
+    config: { systemInstruction, maxOutputTokens, thinkingConfig: { thinkingBudget: 0 } },
   });
   return (res.text ?? "").trim();
 }

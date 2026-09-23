@@ -2,7 +2,8 @@ import { readFile } from "fs/promises";
 import path from "path";
 import JSZip from "jszip";
 import type { DateRange } from "@/lib/zuper/modules";
-import { buildEbrTokenData } from "./ebrTokens";
+import { buildEbrTokenData, type RunFix } from "./ebrTokens";
+import { setSlideNotes } from "./slideNotes";
 import { injectLineChartData } from "./chartData";
 import { insertUsageSlide } from "./usageSlide";
 import { insertAutomationSlide } from "./automationSlide";
@@ -18,6 +19,20 @@ const CHART_FILES: Record<string, keyof Awaited<ReturnType<typeof buildEbrTokenD
   "ppt/charts/chart5.xml": "chart5",
   "ppt/charts/chart6.xml": "chart6",
 };
+
+function escXml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/** Rewrites specific <a:t> runs by position; a run is only changed if it still reads `expect`. */
+function applyRunFixes(xml: string, fixes: RunFix[]): string {
+  let i = -1;
+  return xml.replace(/<a:t>([^<]*)<\/a:t>/g, (whole, text: string) => {
+    i += 1;
+    const fix = fixes.find((f) => f.index === i);
+    return fix && text === fix.expect ? `<a:t>${escXml(fix.text)}</a:t>` : whole;
+  });
+}
 
 function replaceTokens(xml: string, tokens: Record<string, string>): string {
   let out = xml;
@@ -42,7 +57,7 @@ export interface GenerateEbrPptxOptions {
 export async function generateEbrPptx(options: GenerateEbrPptxOptions): Promise<Buffer> {
   const { customerId, customerName, customerWebsite, range, reportTitle } = options;
 
-  const [templateBuffer, { tokens, charts, usage, workflowSummary, periodLabel }] = await Promise.all([
+  const [templateBuffer, { tokens, charts, usage, workflowSummary, periodLabel, fixups, notes }] = await Promise.all([
     readFile(TEMPLATE_PATH),
     buildEbrTokenData(customerId, customerName, customerWebsite ?? null, range, reportTitle),
   ]);
@@ -62,11 +77,18 @@ export async function generateEbrPptx(options: GenerateEbrPptxOptions): Promise<
     }
 
     if (filePath.startsWith("ppt/slides/slide") && filePath.endsWith(".xml")) {
-      const xml = await file.async("string");
-      if (xml.includes("{{")) {
-        zip.file(filePath, replaceTokens(xml, tokens));
-      }
+      let xml = await file.async("string");
+      const original = xml;
+      // Fix-ups first: they match the template's original run text, before tokens are filled.
+      if (fixups[filePath]) xml = applyRunFixes(xml, fixups[filePath]);
+      if (xml.includes("{{")) xml = replaceTokens(xml, tokens);
+      if (xml !== original) zip.file(filePath, xml);
     }
+  }
+
+  // Speaker notes for every template slide (generated slides write their own as they're inserted).
+  for (const [slidePath, slideNotes] of Object.entries(notes)) {
+    if (zip.file(slidePath)) await setSlideNotes(zip, slidePath, slideNotes);
   }
 
   // Generated (non-template) slides. Template charts are chart1–6; generated charts take the next free numbers.

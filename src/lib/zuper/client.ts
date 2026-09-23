@@ -72,7 +72,11 @@ export class ZuperClient {
     private baseUrl: string
   ) {}
 
-  private async request<T>(path: string, params: Record<string, string | number | undefined> = {}): Promise<T> {
+  private async request<T>(
+    path: string,
+    params: Record<string, string | number | undefined> = {},
+    init: { method?: "GET" | "POST"; body?: unknown } = {}
+  ): Promise<T> {
     const qs = new URLSearchParams();
     for (const [key, value] of Object.entries(params)) {
       if (value !== undefined) qs.set(key, String(value));
@@ -80,12 +84,22 @@ export class ZuperClient {
     const query = qs.toString();
     const url = `${this.baseUrl.replace(/\/$/, "")}/${path.replace(/^\//, "")}${query ? `?${query}` : ""}`;
 
-    const res = await fetch(url, {
-      headers: {
-        "x-api-key": this.apiKey,
-        Accept: "application/json",
-      },
-    });
+    let res: Response;
+    for (let attempt = 0; ; attempt++) {
+      res = await fetch(url, {
+        method: init.method ?? "GET",
+        headers: {
+          "x-api-key": this.apiKey,
+          Accept: "application/json",
+          ...(init.body !== undefined ? { "Content-Type": "application/json" } : {}),
+        },
+        body: init.body !== undefined ? JSON.stringify(init.body) : undefined,
+      });
+      // Rate limited (200–700 req/min by plan): honour Retry-After, up to 3 retries.
+      if (res.status !== 429 || attempt >= 3) break;
+      const wait = Math.min(Number(res.headers.get("retry-after") ?? 5), 30);
+      await new Promise((r) => setTimeout(r, wait * 1000));
+    }
 
     const text = await res.text();
     if (!res.ok) {
@@ -150,6 +164,11 @@ export class ZuperClient {
   /** Whole response envelope, e.g. when total_records is the value you want. */
   async getRaw<T>(path: string, params: Record<string, string | number | undefined> = {}): Promise<T> {
     return this.request<T>(path, params);
+  }
+
+  /** POST with a JSON body, whole response envelope (Zuper Connect list endpoints are POST + filters). */
+  async postRaw<T>(path: string, body: unknown, params: Record<string, string | number | undefined> = {}): Promise<T> {
+    return this.request<T>(path, params, { method: "POST", body });
   }
 
   /** For endpoints that return a single {data: {...}} object, e.g. GET /team. */

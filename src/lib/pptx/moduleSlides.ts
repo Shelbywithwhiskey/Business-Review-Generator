@@ -22,6 +22,12 @@ import {
   type WorkforceDeepDive,
 } from "@/lib/reports/moduleMetrics";
 import { COLORS, CONTENT_W, CONTENT_X, ShapeWriter, fmtInt, fmtMoneyCompact, insertGeneratedSlide, run, truncate } from "./generatedSlide";
+import { syncCaveat } from "./templateNotes";
+import { computeCatalogAnalyses, computeCoverage, computeJobServiceDelivery, computePortalAndPay } from "@/lib/reports/catalogMetrics";
+import { connectSlide, coverageSlides, insertChain, jobServiceSlide, moduleSlide, portalPaySlide, timeOnSiteSlide } from "./catalogSlides";
+import { INVOICE_COLLECTION_DEFINITION, QUOTE_ACCEPTANCE_DEFINITION } from "@/lib/reports/classify";
+
+const compact = (xs: (string | number | null | false | undefined)[]) => xs.filter((x): x is string => typeof x === "string" && x.length > 0);
 
 // ---------------------------------------------------------------------------
 // Module deep-dive slides (Jobs, Customers/Organizations/Properties, Team &
@@ -49,6 +55,10 @@ interface DeckContext {
   customerName: string;
   range: DateRange;
   sync: SyncInfo;
+}
+
+function syncLine(ctx: DeckContext): string {
+  return syncCaveat(ctx.sync, ctx.range);
 }
 
 function fmtDate(d: Date | null | undefined): string {
@@ -116,6 +126,14 @@ function scopeSlide(ctx: DeckContext, rows: ScopeRow[]): ShapeWriter {
       (ctx.sync.notes ? ` Sync notes: ${ctx.sync.notes}.` : "")
   );
   w.footer("Each slide's subtitle states its date range; its footer states the data source and how the figures are defined.");
+  w.notes = {
+    purpose: "What the deck covers: every module synced from Zuper, what it contributes for this period, and which date each figure is counted by.",
+    talkingPoints: [
+      "Use this slide to set trust: every number that follows is counted from the customer's own Zuper records — nothing is estimated or benchmarked.",
+      "If the customer questions a figure later, come back here for the date basis.",
+    ],
+    caveats: compact([syncLine(ctx), ctx.sync.notes && `Modules skipped or partially synced: ${ctx.sync.notes}.`]),
+  };
   return w;
 }
 
@@ -214,6 +232,25 @@ function jobsVolumeSlide(ctx: DeckContext, j: JobDeepDive): ShapeWriter {
       : "No jobs were created in this period."
   );
   w.footer(`Source: Zuper Jobs · jobs created in the period; monthly "Completed" = jobs completed in that month · ${synced(ctx)}`);
+  w.notes = {
+    purpose: "Job volume and mix: how much work was created, how much is done, and which job categories drive it.",
+    callouts: compact([
+      j.created > 0 && `${pct(j.completionRate)} of the ${fmtInt(j.created)} jobs created are completed; ${fmtInt(j.cancelled)} were cancelled.`,
+      top && `${top.name} is the largest category (${fmtInt(top.created)} jobs, ${pct(top.created / Math.max(j.created, 1), 0)}).`,
+      busiest?.created && `Busiest month: ${busiest.label} (${fmtInt(busiest.created)} jobs created).`,
+      j.unscheduledOpen > 0 && `${plural(j.unscheduledOpen, "open job")} ${j.unscheduledOpen === 1 ? "has" : "have"} no schedule yet${j.unscheduledOpen / Math.max(j.created, 1) > 0.25 ? " — over a quarter of the period's jobs, worth raising as a dispatch backlog" : ""}.`,
+      j.highPriority > 0 && `${plural(j.highPriority, "job")} marked high or urgent priority.`,
+    ]),
+    metrics: [
+      { label: "Jobs created", value: fmtInt(j.created), definition: "Jobs whose created date falls in the period.", source: "Zuper Jobs", evidence: "Observed activity" },
+      { label: "Completed", value: fmtInt(j.completed), definition: "Of those, jobs whose current status type is Completed or Closed.", source: "Zuper Jobs", evidence: "Observed activity" },
+      { label: "Cancelled", value: fmtInt(j.cancelled), definition: "Of those, jobs whose current status type is Cancelled or Declined.", source: "Zuper Jobs", evidence: "Observed activity" },
+      { label: "Recurring jobs", value: pct(j.recurringShare, 0), definition: "Share of jobs created from a recurrence (is_recurrence).", source: "Zuper Jobs", evidence: "Observed activity" },
+      { label: "Open & not yet scheduled", value: fmtInt(j.unscheduledOpen), definition: "Jobs created in the period that are not completed/cancelled and have no schedule (is_scheduled = false).", source: "Zuper Jobs", evidence: "Current state" },
+      { label: "Monthly chart", definition: "Created = jobs created that month; Completed = jobs whose completion status entry falls in that month (can include jobs created earlier).", source: "Zuper Jobs status history", evidence: "Observed activity" },
+    ],
+    caveats: [syncLine(ctx)],
+  };
   return w;
 }
 
@@ -259,6 +296,24 @@ function jobsLifecycleSlide(ctx: DeckContext, j: JobDeepDive): ShapeWriter {
       .join("; ") + "."
   );
   w.footer(`Source: Zuper Jobs status history (time on each status, as recorded by Zuper) · ${plural(j.lifecycleSample, "scheduled job")} measured · ages as of today · ${synced(ctx)}`);
+  w.notes = {
+    purpose: "Where jobs slow down: time from creation to schedule to completion, which statuses hold jobs longest, and what is still open.",
+    callouts: compact([
+      slowest && `Longest status: "${slowest.name}" — ${fmtDuration(slowest.avgHours)} on average across ${plural(slowest.jobs, "job")}.`,
+      biggestOpen && `Largest open backlog: "${biggestOpen.name}" with ${plural(biggestOpen.count, "job")} (median age ${biggestOpen.medianAgeDays?.toFixed(0) ?? "—"} days).`,
+      j.medianHoursToSchedule != null && `Median time from job created to scheduled: ${fmtDuration(j.medianHoursToSchedule)}.`,
+      j.medianDaysCreatedToComplete != null && `Median time from created to completed: ${j.medianDaysCreatedToComplete.toFixed(1)} days.`,
+    ]),
+    talkingPoints: ["Ask what happens in the slowest status — waiting on parts, approvals or customer response each point to a different fix (inventory, workflow automation, customer reminders)."],
+    metrics: [
+      { label: "Median created → scheduled", value: fmtDuration(j.medianHoursToSchedule), definition: "Hours from job creation to its first Scheduled status entry, median across jobs that were scheduled.", source: "Zuper Jobs status history", evidence: "Observed activity" },
+      { label: "Median scheduled → completed", value: fmtDuration(j.medianHoursScheduledToComplete), definition: "Hours from first Scheduled to first Completed status entry.", source: "Zuper Jobs status history", evidence: "Observed activity" },
+      { label: "Median created → completed", value: j.medianDaysCreatedToComplete == null ? "—" : `${j.medianDaysCreatedToComplete.toFixed(1)} days`, definition: "Days from creation to the Completed status entry.", source: "Zuper Jobs", evidence: "Observed activity" },
+      { label: "Still open from this period", value: fmtInt(openTotal), definition: "Jobs created in the period whose current status isn't completed or cancelled, grouped by current status; age = days since creation as of today.", source: "Zuper Jobs", evidence: "Current state" },
+      { label: "Average hours in each status", definition: "Zuper's time_on_status for every status a job has already left (the current status is excluded because its clock is still running); statuses seen on fewer than 3 jobs are hidden.", source: "Zuper Jobs status history", evidence: "Observed activity" },
+    ],
+    caveats: [`${plural(j.lifecycleSample, "scheduled job")} had usable status history.`, "Waiting time in a status is elapsed time, not work time.", syncLine(ctx)],
+  };
   return w;
 }
 
@@ -320,6 +375,26 @@ function accountsSlide(ctx: DeckContext, a: AccountsDeepDive): ShapeWriter {
       .join("; ") + "."
   );
   w.footer(`Source: Zuper Customers, Organizations & Properties · "new" by created date · lifetime value, receivables and property job counts are Zuper's all-time figures · ${synced(ctx)}`);
+  w.notes = {
+    purpose: "Who the work is for: the customer base, B2B organizations and service properties, and how concentrated the value is.",
+    callouts: compact([
+      `${fmtInt(a.customers.newInPeriod)} new customers were added this period (${fmtInt(a.customers.total)} total).`,
+      topOrg && a.jobsWithOrganization && `${topOrg.name} generated the most work: ${plural(topOrg.jobs, "job")} (${pct(topOrg.jobs / a.jobsWithOrganization, 0)} of organization-linked jobs).`,
+      a.top5LtvShare > 0.5 && `Concentration: the top 5 customers hold ${pct(a.top5LtvShare, 0)} of lifetime value — losing one would be felt.`,
+      `${pct(a.customers.repeatShare, 0)} of customers have booked more than one job.`,
+      a.totalReceivables > 0 && `${fmtMoneyCompact(a.totalReceivables)} in receivables across all customers (Zuper's figure).`,
+    ]),
+    metrics: [
+      { label: "Customers", value: fmtInt(a.customers.total), definition: "All end customers on the account; new = created in the period.", source: "Zuper Customers", evidence: "Current state" },
+      { label: "Organizations", value: fmtInt(a.organizations.total), definition: "B2B organizations on the account; new = created in the period.", source: "Zuper Organizations", evidence: "Current state" },
+      { label: "Properties", value: fmtInt(a.properties.total), definition: "Service locations on the account; new = created in the period.", source: "Zuper Properties", evidence: "Current state" },
+      { label: "Lifetime value in top 5 customers", value: pct(a.top5LtvShare, 0), definition: "Sum of Zuper's lifetime value (accounts.ltv) for the 5 highest customers ÷ all customers.", source: "Zuper Customers", evidence: "Current state" },
+      { label: "Receivables", value: fmtMoneyCompact(a.totalReceivables), definition: "Sum of Zuper's receivables figure across all customers (all-time, not just this period).", source: "Zuper Customers", evidence: "Current state" },
+      { label: "Top organizations chart", definition: "Jobs created in the period linked to each organization.", source: "Zuper Jobs + Organizations", evidence: "Observed activity" },
+      { label: "Most-serviced properties", definition: "Zuper's all-time job count per property (no_of_jobs).", source: "Zuper Properties", evidence: "Current state" },
+    ],
+    caveats: ["Lifetime value and receivables are Zuper's own all-time figures, not limited to the report period.", syncLine(ctx)],
+  };
   return w;
 }
 
@@ -369,6 +444,24 @@ function workforceSlide(ctx: DeckContext, t: WorkforceDeepDive, jobsCreated: num
       .join("; ") + "."
   );
   w.footer(`Source: Zuper Jobs (primary assignee) & Timesheets · jobs created in the period · ${synced(ctx)}`);
+  w.notes = {
+    purpose: "Who is doing the work: team size, workload per technician, unassigned jobs and time tracking.",
+    callouts: compact([
+      top && `${top.name} carried the most work: ${plural(top.assigned, "job")} assigned, ${fmtInt(top.completed)} completed (${pct(topShare, 0)} of assigned jobs).`,
+      topShare > 0.35 && "One person carries over a third of assigned jobs — a key-person dependency worth raising.",
+      t.jobsUnassigned > 0 && `${plural(t.jobsUnassigned, "job")} from this period ${t.jobsUnassigned === 1 ? "has" : "have"} no technician assigned.`,
+      t.teamSize > t.loggedInThisPeriod && `${fmtInt(t.teamSize - t.loggedInThisPeriod)} active users haven't logged in during or since the period — confirm the seats are still needed.`,
+      !t.timesheetEvents && "Time tracking isn't in use; turning on clock-in/out unlocks utilization and labor-cost reporting.",
+    ]),
+    metrics: [
+      { label: "Active users", value: fmtInt(t.teamSize), definition: "Users marked active across the account's teams.", source: "Zuper Teams", evidence: "Current state" },
+      { label: "Logged in during / since period", value: fmtInt(t.loggedInThisPeriod), definition: "Active users whose last login is on or after the period start.", source: "Zuper Teams (last_login_at)", evidence: "Current state" },
+      { label: "Jobs with an assigned technician", value: pct(assignedShare, 0), definition: "Jobs created in the period with a primary assignee ÷ all jobs created in the period.", source: "Zuper Jobs", evidence: "Observed activity" },
+      { label: "Jobs per technician", definition: "Jobs created in the period by primary assignee; completed = now Completed/Closed.", source: "Zuper Jobs", evidence: "Observed activity" },
+      { label: "Hours clocked", value: t.timesheetEvents ? `${fmtInt(t.timesheetHours)} h` : "Not tracked", definition: "Paired clock-in → clock-out timesheet events per user in the period.", source: "Zuper Timesheets", evidence: t.timesheetEvents ? "Observed activity" : "Insufficient data" },
+    ],
+    caveats: ["Only the primary assignee is counted per job; helpers on multi-tech jobs aren't credited.", syncLine(ctx)],
+  };
   return w;
 }
 
@@ -387,6 +480,15 @@ function projectsSlide(ctx: DeckContext, p: ProjectsDeepDive): ShapeWriter {
   } else w.empty(a, "No projects were created in this period");
   w.insight(p.byStatus[0] ? `${plural(p.createdInPeriod, "project")} created this period; the most common status is "${p.byStatus[0].name}" (${fmtInt(p.byStatus[0].count)}).` : `${plural(p.total, "project")} on the account; none were created this period.`);
   w.footer(`Source: Zuper Projects · by project created date · ${synced(ctx)}`);
+  w.notes = {
+    purpose: "Multi-job projects on the account and their current status.",
+    callouts: compact([p.byStatus[0] && `Most common status for projects created this period: "${p.byStatus[0].name}" (${fmtInt(p.byStatus[0].count)}).`]),
+    metrics: [
+      { label: "Projects (all-time)", value: fmtInt(p.total), definition: "Every project on the account.", source: "Zuper Projects", evidence: "Current state" },
+      { label: "Created this period", value: fmtInt(p.createdInPeriod), definition: "Projects whose created date falls in the period.", source: "Zuper Projects", evidence: "Observed activity" },
+    ],
+    caveats: ["Project fields were mapped without a populated test account — double-check statuses against Zuper before presenting.", syncLine(ctx)],
+  };
   return w;
 }
 
@@ -434,6 +536,23 @@ function quotesSlide(ctx: DeckContext, q: QuoteDeepDive): ShapeWriter {
       : "No quotes were created in this period — quoting in Zuper would make pipeline and win-rate visible here."
   );
   w.footer(`Source: Zuper Quotes (estimates) · by quote date · approval time from sent (or quote) date to acceptance · ${synced(ctx)}`);
+  w.notes = {
+    purpose: "Quote pipeline: how many quotes went out, how many were won, and how quickly.",
+    callouts: compact([
+      q.sent > 0 && `${pct(q.conversionRate)} of ${plural(q.sent, "sent quote")} were accepted, worth ${fmtMoneyCompact(q.convertedValue)}.`,
+      q.medianDaysToAccept != null && `Accepted quotes took a median ${q.medianDaysToAccept.toFixed(1)} days from sent to accepted.`,
+      q.expiredOpen > 0 && `${plural(q.expiredOpen, "quote")} expired without approval — automated reminders before expiry could recover some.`,
+      topStatus && `Most common status: ${topStatus.name.replace(/_/g, " ").toLowerCase()} (${fmtInt(topStatus.count)}).`,
+    ]),
+    metrics: [
+      { label: "Quotes created", value: `${fmtInt(q.count)} · ${fmtMoneyCompact(q.value)}`, definition: "Quotes dated in the period, any status.", source: "Zuper Quotes", evidence: "Observed activity" },
+      { label: "Approved / converted", value: `${pct(q.conversionRate)} (${fmtInt(q.convertedCount)})`, definition: QUOTE_ACCEPTANCE_DEFINITION, source: "Zuper Quotes", evidence: "Observed activity" },
+      { label: "Value won", value: fmtMoneyCompact(q.convertedValue), definition: "Total value of accepted quotes.", source: "Zuper Quotes", evidence: "Observed activity" },
+      { label: "Median days to approval", value: q.medianDaysToAccept == null ? "—" : `${q.medianDaysToAccept.toFixed(1)} days`, definition: `Days from sent date (or quote date if never sent) to accepted/converted date; ${plural(q.acceptSample, "quote")} measured.`, source: "Zuper Quotes", evidence: "Observed activity" },
+      { label: "Expired without approval", value: fmtInt(q.expiredOpen), definition: "Quotes flagged expired and not converted.", source: "Zuper Quotes", evidence: "Current state" },
+    ],
+    caveats: ["Accepted quote value is won work, not revenue until invoiced and paid.", "Quotes from late in the period are still being decided.", syncLine(ctx)],
+  };
   return w;
 }
 
@@ -479,6 +598,31 @@ function invoicesSlide(ctx: DeckContext, inv: InvoiceDeepDive): ShapeWriter {
       "."
   );
   w.footer(`Source: Zuper Invoices & Payments · invoices by invoice date, aging vs due date as of today · payments by payment date · ${synced(ctx)}`);
+  const topMode = inv.paymentModes[0];
+  w.notes = {
+    purpose: "Getting paid: what's outstanding and how overdue, how fast invoices are paid, and how customers pay.",
+    callouts: compact([
+      `${fmtMoneyCompact(inv.outstanding)} of ${fmtMoneyCompact(inv.invoiced)} invoiced is still outstanding.`,
+      over60 > 0 && `${fmtMoneyCompact(over60)} is more than 60 days past due — the collections priority.`,
+      inv.medianDaysToPay != null && `Paid invoices took a median ${inv.medianDaysToPay.toFixed(0)} days from invoice date to payment.`,
+      inv.paidOnTimeShare != null && `${pct(inv.paidOnTimeShare, 0)} of paid invoices with a due date were paid on time.`,
+      inv.paymentsTotal > 0 && `${pct(inv.onlineShare, 0)} of ${fmtMoneyCompact(inv.paymentsTotal)} received was paid online${inv.onlineShare < 0.2 ? " — low; Zuper Pay payment links and card-on-file are the lever" : ""}.`,
+      topMode && `Most-used payment method: ${topMode.name} (${fmtMoneyCompact(topMode.amount)}).`,
+    ]),
+    metrics: [
+      { label: "Invoiced", value: `${fmtMoneyCompact(inv.invoiced)} · ${plural(inv.count, "invoice")}`, definition: `Invoices dated in the period, excluding ${fmtInt(inv.voided)} voided/canceled.`, source: "Zuper Invoices", evidence: "Observed activity" },
+      { label: "Collected", value: fmtMoneyCompact(inv.collected), definition: INVOICE_COLLECTION_DEFINITION, source: "Zuper Invoices", evidence: "Observed activity" },
+      { label: "Outstanding > 60 days past due", value: fmtMoneyCompact(over60), definition: "Unpaid balance on these invoices whose due date is more than 60 days before today.", source: "Zuper Invoices", evidence: "Current state" },
+      { label: "Median days to get paid", value: inv.medianDaysToPay == null ? "—" : `${inv.medianDaysToPay.toFixed(0)} days`, definition: `Invoice date → paid date for ${plural(inv.paidSample, "paid invoice")}.`, source: "Zuper Invoices", evidence: "Observed activity" },
+      { label: "Payments collected online", value: pct(inv.onlineShare, 0), definition: "Payments dated in the period with payment mode type ONLINE ÷ all payments in the period (by amount).", source: "Zuper Payments", evidence: "Observed activity" },
+    ],
+    caveats: [
+      "Payments are counted by payment date, so they can include payments for invoices issued before the period.",
+      "ONLINE payment mode is the closest proxy the API gives for Zuper Pay / digital collection.",
+      "Collections are cash timing — not revenue or profit.",
+      syncLine(ctx),
+    ],
+  };
   return w;
 }
 
@@ -493,6 +637,15 @@ function executionsSlide(ctx: DeckContext, e: ExecutionDeepDive): ShapeWriter {
     w.empty(box, "Workflow execution counts haven't been synced for this period yet — run a sync to include them.");
     w.insight("Execution counts come from Workflow Builder's execution history and are refreshed on every sync.");
     w.footer(`Source: Zuper Workflow Builder execution history · ${synced(ctx)}`);
+    w.notes = {
+      purpose: "How the account's automations actually ran — run volume, failures and their causes.",
+      callouts: ["Execution counts aren't in this deck yet: the last sync didn't include this report period's workflow runs."],
+      caveats: [
+        "Re-run Sync from Zuper with this report's dates, then download the deck again. Zuper only keeps about two months of run history, so sync soon after the period ends.",
+        syncLine(ctx),
+      ],
+      editBeforePresenting: ["Delete this slide if you can't re-sync before the meeting."],
+    };
     return w;
   }
 
@@ -545,6 +698,27 @@ function executionsSlide(ctx: DeckContext, e: ExecutionDeepDive): ShapeWriter {
       .replace(/^./, (c) => c.toUpperCase()) + "."
   );
   w.footer(`Source: Zuper Workflow Builder execution history (exact counts) · failure rate excludes skipped runs · run time from ${fmtInt(Math.min(e.completed, 1000))} completed runs · ${synced(ctx)}`);
+  w.notes = {
+    purpose: "How the automations actually ran: volume, failures, and what's causing them.",
+    callouts: compact([
+      `${fmtInt(e.total)} runs in the window; ${pct(e.failureRate)} of runs that executed failed.`,
+      worst && `"${worst.name}" failed ${fmtInt(worst.failed)} times (${pct(worst.failureRate, 0)} of its runs) — fix this one first.`,
+      topError && `Most common failure: "${topError.message}" (${fmtInt(topError.count)} of ${fmtInt(e.errorSampleSize)} failed runs sampled).`,
+      topError && /limit/i.test(topError.message) && "The account is hitting a Workflow Builder execution limit — review the plan limit or reduce unnecessary triggers (e.g. a workflow firing on every update).",
+      e.peakWeek && e.total && e.peakWeek.total / e.total > 0.4 && `One week (from ${fmtDate(new Date(e.peakWeek.weekStart))}) had ${pct(e.peakWeek.total / e.total, 0)} of all runs — check for a runaway trigger.`,
+    ]),
+    metrics: [
+      { label: "Total executions", value: fmtInt(e.total), definition: "Completed + failed + skipped runs in the window.", source: "Workflow Builder execution history", evidence: "Observed activity" },
+      { label: "Failed", value: `${fmtInt(e.failed)} (${pct(e.failureRate)})`, definition: "Failed ÷ (completed + failed); skipped runs are excluded because their trigger conditions weren't met.", source: "Workflow Builder execution history", evidence: "Observed activity" },
+      { label: "Skipped", value: fmtInt(e.skipped), definition: "Runs whose trigger fired but conditions weren't met.", source: "Workflow Builder execution history", evidence: "Observed activity" },
+      { label: "Median run time", value: e.medianMs == null ? "—" : `${(e.medianMs / 1000).toFixed(1)} s`, definition: "Median execution_time_ms across up to 1,000 completed runs.", source: "Workflow Builder execution history", evidence: "Observed activity" },
+    ],
+    caveats: [
+      `Zuper keeps about two months of run history (oldest available: ${fmtDate(e.retainedFrom)}), so the window can be shorter than the report period.`,
+      "Run counts include retries — a high count isn't the same as more work automated.",
+      syncLine(ctx),
+    ],
+  };
   return w;
 }
 
@@ -573,17 +747,35 @@ export async function insertModuleSlides(zip: JSZip, input: ModuleDeckInput): Pr
     computeInvoiceDeepDive(customerId, range),
     computeExecutionDeepDive(customerId, range),
   ]);
+  const [delivery, portalPay, catalog, coverage] = await Promise.all([
+    computeJobServiceDelivery(customerId, range),
+    computePortalAndPay(customerId, range),
+    computeCatalogAnalyses(customerId, range),
+    computeCoverage(customerId),
+  ]);
   const ctx: DeckContext = { customerName: input.customerName, range, sync };
+  const cctx = { customerName: input.customerName, range, syncLine: syncLine(ctx) };
 
   // Template anchors: 12 = "Business KPI - Highlights" divider, 14 = Job Performance,
   // 15 = Daily Operations, 17 = Quote quarterly, 18 = Invoice quarterly.
   await insertGeneratedSlide(zip, "ppt/slides/slide12.xml", scopeSlide(ctx, scopeRows(jobs, input.usage, accounts, team, projects, quotes, invoices, input.workflowSummary, exec)));
-  const lifecycleAfter = await insertGeneratedSlide(zip, "ppt/slides/slide14.xml", jobsVolumeSlide(ctx, jobs));
-  await insertGeneratedSlide(zip, lifecycleAfter, jobsLifecycleSlide(ctx, jobs));
+  const volume = await insertGeneratedSlide(zip, "ppt/slides/slide14.xml", jobsVolumeSlide(ctx, jobs));
+  const lifecycle = await insertGeneratedSlide(zip, volume, jobsLifecycleSlide(ctx, jobs));
+  await insertChain(zip, lifecycle, [jobServiceSlide(cctx, delivery), timeOnSiteSlide(cctx, delivery)]);
   let after = await insertGeneratedSlide(zip, "ppt/slides/slide15.xml", accountsSlide(ctx, accounts));
   after = await insertGeneratedSlide(zip, after, workforceSlide(ctx, team, jobs.created));
   if (projects.total > 0) await insertGeneratedSlide(zip, after, projectsSlide(ctx, projects));
   await insertGeneratedSlide(zip, "ppt/slides/slide17.xml", quotesSlide(ctx, quotes));
-  await insertGeneratedSlide(zip, "ppt/slides/slide18.xml", invoicesSlide(ctx, invoices));
-  await insertGeneratedSlide(zip, input.automationSlidePath, executionsSlide(ctx, exec));
+  const invoiceDeepDive = await insertGeneratedSlide(zip, "ppt/slides/slide18.xml", invoicesSlide(ctx, invoices));
+  await insertGeneratedSlide(zip, invoiceDeepDive, portalPaySlide(cctx, portalPay));
+
+  // Adoption section: executions, Zuper Connect, then every other module with data, then coverage.
+  const executions = await insertGeneratedSlide(zip, input.automationSlidePath, executionsSlide(ctx, exec));
+  const byKey = new Map(catalog.map((m) => [m.key, m]));
+  const SHOWN_ELSEWHERE = new Set(["job_timelogs", "unscheduled_jobs", "organizations_portal", "connect_calls", "connect_sms", "payment_requests"]);
+  await insertChain(zip, executions, [
+    connectSlide(cctx, byKey.get("connect_calls"), byKey.get("connect_sms"), coverage),
+    ...catalog.filter((m) => !SHOWN_ELSEWHERE.has(m.key)).map((m) => moduleSlide(cctx, m)),
+    ...coverageSlides(cctx, coverage),
+  ]);
 }

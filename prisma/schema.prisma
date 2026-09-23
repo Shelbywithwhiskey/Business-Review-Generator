@@ -39,6 +39,8 @@ model Customer {
   projects          Project[]
   workflows         Workflow[]
   executionSnapshots WorkflowExecutionSnapshot[]
+  zuperRecords      ZuperRecord[]
+  moduleCoverage    ModuleCoverage[]
   metricSnapshots   MetricSnapshot[]
   healthScores      HealthScore[]
   opportunities     OpportunitySignal[]
@@ -138,6 +140,9 @@ model Job {
   // job_status[] history: [{ type, name, at (ISO), minutes }] — minutes = Zuper's time_on_status,
   // verified 2026-09-23 to equal the gap to the next status entry, in minutes.
   statusHistory  Json?
+  // Every other field of the job, compacted (see lib/zuper/compact.ts): job type, schedule
+  // window, invoice link, tags, ratings, custom fields... — analysed without schema changes.
+  extra          Json?
   syncRunId      String
 
   @@unique([customerId, zuperJobId])
@@ -326,6 +331,9 @@ model Payment {
   paymentModeType  String? // "ONLINE" | "OFFLINE" — used as a Zuper Pay / digital-payment proxy
   actionModule     String? // "INVOICE" | ...
   status           String? // "SUCCESS" | ...
+  // Where the payment was made (e.g. customer portal, mobile app, web) and its type, as Zuper sends them.
+  source           String?
+  paymentType      String?
   zuperInvoiceId   String?
   zuperPayUsed     Boolean  @default(false)
   paidAt           DateTime
@@ -410,6 +418,49 @@ model EndCustomerLedger {
   syncRunId       String
 
   @@unique([customerId, zuperCustomerId])
+}
+
+// Raw records from every Zuper module that has no dedicated table (assets, service
+// contracts, requests, purchase orders, routes, credit notes, time logs, Zuper Connect
+// calls, ...). See lib/zuper/catalog.ts. Stored as-is so any field can be analysed
+// later without a schema change; replaced on each catalog sync.
+model ZuperRecord {
+  id              String    @id @default(cuid())
+  customerId      String
+  customer        Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  module          String // catalog key, e.g. "assets", "service_contracts"
+  recordUid       String
+  data            Json
+  recordCreatedAt DateTime?
+  syncRunId       String
+
+  @@unique([customerId, module, recordUid])
+  @@index([customerId, module, recordCreatedAt])
+}
+
+// What each Zuper module returned on the last sync — the evidence behind the
+// "Data coverage" slides (SPEC §14.3: record source, row counts, missingness).
+model ModuleCoverage {
+  id           String   @id @default(cuid())
+  customerId   String
+  customer     Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  module       String
+  label        String
+  endpoint     String
+  // ok | empty | not_available (403/404) | error | skipped | not_in_api
+  status       String
+  httpStatus   Int?
+  recordCount  Int      @default(0)
+  // Zuper's own total_records, when the endpoint reports it (can exceed recordCount if capped).
+  totalRecords Int?
+  truncated    Boolean  @default(false)
+  // [{ path, filled, sample }] for top-level fields — fill rate across fetched records.
+  fieldStats   Json?
+  message      String?
+  fetchedAt    DateTime @default(now())
+  syncRunId    String
+
+  @@unique([customerId, module])
 }
 
 model MetricSnapshot {

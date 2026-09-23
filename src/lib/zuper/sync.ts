@@ -20,6 +20,7 @@ import {
   type DateRange,
 } from "./modules";
 import { computeTechnicianRollups, computeTimesheetHours } from "@/lib/analytics";
+import { upsertCoverage } from "./catalog";
 
 export const ALL_MODULES: ModuleKey[] = [
   "jobs",
@@ -96,7 +97,7 @@ export async function runSync(
       for await (const page of jobsModule.fetch(client)) {
         await Promise.all(
           page.map(({ job }) => {
-            const data = { ...job, statusHistory: json(job.statusHistory) };
+            const data = { ...job, statusHistory: json(job.statusHistory), extra: json(job.extra) };
             return prisma.job.upsert({
               where: { customerId_zuperJobId: { customerId, zuperJobId: job.zuperJobId } },
               create: { ...data, customerId, syncRunId: syncRun.id },
@@ -344,6 +345,37 @@ export async function runSync(
     }
     if (modules.includes("timesheets") && modules.includes("teams")) {
       await computeTimesheetHours(customerId, range);
+    }
+
+    // Coverage rows for the dedicated-table modules (catalog modules write their own).
+    const typedCounts: [ModuleKey, string, string, () => Promise<number>][] = [
+      ["jobs", "Jobs", "GET /jobs", () => prisma.job.count({ where: { customerId } })],
+      ["invoices", "Invoices", "GET /invoice", () => prisma.invoice.count({ where: { customerId } })],
+      ["quotes", "Quotes (estimates)", "GET /estimate", () => prisma.quote.count({ where: { customerId } })],
+      ["teams", "Team members", "GET /team", () => prisma.technician.count({ where: { customerId, periodStart: range.start, periodEnd: range.end } })],
+      ["payments", "Payments", "GET /payments/transactions", () => prisma.payment.count({ where: { customerId } })],
+      ["products", "Products & parts catalog", "GET /product", () => prisma.product.count({ where: { customerId } })],
+      ["expenses", "Expenses", "GET /expenses", () => prisma.expense.count({ where: { customerId } })],
+      ["timesheets", "Timesheets (clock in/out)", "GET /timesheets", () => prisma.timesheetEvent.count({ where: { customerId } })],
+      ["endCustomers", "Customers", "GET /customers", () => prisma.endCustomerLedger.count({ where: { customerId } })],
+      ["organizations", "Organizations", "GET /organization", () => prisma.organization.count({ where: { customerId } })],
+      ["properties", "Properties", "GET /property", () => prisma.property.count({ where: { customerId } })],
+      ["projects", "Projects", "GET /projects", () => prisma.project.count({ where: { customerId } })],
+      ["workflows", "Workflows", "GET workflow:/workflows", () => prisma.workflow.count({ where: { customerId } })],
+      ["executions", "Workflow executions", "GET workflow:/workflows/execution_history", () => prisma.workflowExecutionSnapshot.count({ where: { customerId } })],
+    ];
+    for (const [key, label, endpoint, count] of typedCounts) {
+      if (!modules.includes(key)) continue;
+      const skipped = notes.find((n) => n.startsWith(`${key} skipped`));
+      const n = skipped ? 0 : await count();
+      await upsertCoverage(customerId, syncRun.id, {
+        module: key,
+        label,
+        endpoint,
+        status: skipped ? "error" : n > 0 ? "ok" : "empty",
+        recordCount: n,
+        message: skipped ?? null,
+      });
     }
 
     await prisma.apiCredential.update({

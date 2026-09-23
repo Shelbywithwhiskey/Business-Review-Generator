@@ -134,5 +134,23 @@ export async function insertAutomationSlide(zip: JSZip, s: WorkflowSummary, cust
   drawWorkflowList(w, CARD_XS[2], s);
   w.insight(automationInsight(s));
   w.footer('Source: Zuper Workflow Builder definitions (current configuration) · "ran this period" = most recent run falls in the period · run counts on the next slide');
+  const topWork = s.categories.find((c) => !PLUMBING_CATEGORIES.includes(c.key));
+  w.notes = {
+    purpose: `What ${customerName} has automated with Workflow Builder: what starts each automation and what kind of manual work it replaces.`,
+    callouts: [
+      automationInsight(s),
+      ...(s.drafts > 0 ? [`${plural(s.drafts, "workflow")} ${s.drafts === 1 ? "is" : "are"} still in draft and never run — ask whether they should be finished or deleted.`] : []),
+      ...(s.needsAttention > 0 ? [`${plural(s.needsAttention, "workflow")} flagged as needing attention: ${s.workflows.filter((w) => w.needsAttention).slice(0, 4).map((w) => w.name).join("; ")}.`] : []),
+      ...(topWork ? [`Biggest category of automated work: ${topWork.label.toLowerCase()} (${plural(topWork.steps, "step")} across ${plural(topWork.workflows, "workflow")}).`] : []),
+    ],
+    metrics: [
+      { label: "Workflows present", value: fmtInt(s.total), definition: "All workflows in Workflow Builder, any state.", source: "Zuper Workflow Builder", evidence: "Configuration" },
+      { label: "Live", value: fmtInt(s.live), definition: "Active and published — the only workflows that run.", source: "Zuper Workflow Builder", evidence: "Configuration" },
+      { label: "Ran this period", value: fmtInt(s.ranInPeriod), definition: "Live workflows whose most recent run falls in the period (a floor on activity, not a run count).", source: "Zuper Workflow Builder", evidence: "Observed activity" },
+      { label: "Automated steps", value: fmtInt(s.liveSteps), definition: "Action steps (excluding the trigger) across live workflows.", source: "Zuper Workflow Builder (published nodes)", evidence: "Configuration" },
+      { label: "What gets automated", definition: "Each action step bucketed by its action type: emails/notifications, record updates, records created, external calls; lookups, branching and code are grouped as behind-the-scenes logic.", source: "Zuper Workflow Builder", evidence: "Configuration" },
+    ],
+    caveats: ["A configured step shows what's automated, not how much time it saves — time savings need a measured before/after baseline."],
+  };
   return insertGeneratedSlide(zip, INSERT_AFTER, w);
 }
