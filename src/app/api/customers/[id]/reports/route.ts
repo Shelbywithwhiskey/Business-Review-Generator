@@ -10,6 +10,7 @@ export const maxDuration = 300;
 const schema = z.object({
   periodStart: z.string(),
   periodEnd: z.string(),
+  type: z.enum(["QBR", "MBR", "HBR"]).default("QBR"),
 });
 
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -28,7 +29,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     data: {
       customerId,
       templateId: template.id,
-      type: "QBR",
+      type: parsed.data.type,
       periodStart: range.start,
       periodEnd: range.end,
       compareMode: "previous_period",

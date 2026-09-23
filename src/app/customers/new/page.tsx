@@ -8,6 +8,7 @@ export default function NewCustomerPage() {
   const router = useRouter();
   const [name, setName] = useState("");
   const [zuperAccountId, setZuperAccountId] = useState("");
+  const [website, setWebsite] = useState("");
   const [notes, setNotes] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -19,7 +20,7 @@ export default function NewCustomerPage() {
     const res = await fetch("/api/customers", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, zuperAccountId, notes: notes || undefined }),
+      body: JSON.stringify({ name, zuperAccountId, website: website || undefined, notes: notes || undefined }),
     });
     setLoading(false);
     if (!res.ok) {
@@ -55,6 +56,18 @@ export default function NewCustomerPage() {
               className="w-full rounded-md border border-neutral-300 px-3 py-2 dark:border-neutral-700 dark:bg-neutral-900"
               placeholder="acme-fs"
             />
+          </div>
+          <div>
+            <label className="mb-1 block text-sm font-medium">Company website (optional)</label>
+            <input
+              value={website}
+              onChange={(e) => setWebsite(e.target.value)}
+              className="w-full rounded-md border border-neutral-300 px-3 py-2 dark:border-neutral-700 dark:bg-neutral-900"
+              placeholder="acmefieldservices.com"
+            />
+            <p className="mt-1 text-xs text-neutral-500">
+              Used to give the AI engine business context (industry, services) when generating recommendations.
+            </p>
           </div>
           <div>
             <label className="mb-1 block text-sm font-medium">Notes (optional)</label>

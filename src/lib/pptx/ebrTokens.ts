@@ -1,5 +1,5 @@
 import type { DateRange } from "@/lib/zuper/modules";
-import { computeJobMetrics } from "@/lib/analytics";
+import { computeJobMetrics, computePaymentMetrics } from "@/lib/analytics";
 import {
   computeQuoteBreakdown,
   computeInvoiceBreakdown,
@@ -8,7 +8,10 @@ import {
   computeQuarterlySeries,
   computeMonthlySeries,
   computeWorkflowSummary,
+  computeRecommendationSignals,
 } from "@/lib/reports/ebrMetrics";
+import { generateBusinessRecommendations } from "@/lib/ai";
+import { fetchWebsiteContext } from "@/lib/website";
 import { niceAxisMax, type LineChartData } from "./chartData";
 
 // ---------------------------------------------------------------------------
@@ -66,19 +69,23 @@ export interface EbrTokenData {
 export async function buildEbrTokenData(
   customerId: string,
   customerName: string,
+  customerWebsite: string | null,
   range: DateRange,
   reportTitle: string
 ): Promise<EbrTokenData> {
-  const [jobs, quotes, invoices, topCategories, footprint, quarters, months, workflowSummary] = await Promise.all([
-    computeJobMetrics(customerId, range),
-    computeQuoteBreakdown(customerId, range),
-    computeInvoiceBreakdown(customerId, range),
-    computeTopJobCategories(customerId, range, 3),
-    computeFootprintComparison(customerId, range),
-    computeQuarterlySeries(customerId, range, 4),
-    computeMonthlySeries(customerId, range, 13),
-    computeWorkflowSummary(customerId),
-  ]);
+  const [jobs, quotes, invoices, payments, topCategories, footprint, quarters, months, workflowSummary, websiteContext] =
+    await Promise.all([
+      computeJobMetrics(customerId, range),
+      computeQuoteBreakdown(customerId, range),
+      computeInvoiceBreakdown(customerId, range),
+      computePaymentMetrics(customerId, range),
+      computeTopJobCategories(customerId, range, 3),
+      computeFootprintComparison(customerId, range),
+      computeQuarterlySeries(customerId, range, 4),
+      computeMonthlySeries(customerId, range, 13),
+      computeWorkflowSummary(customerId),
+      customerWebsite ? fetchWebsiteContext(customerWebsite) : Promise.resolve(null),
+    ]);
 
   const [cat1, cat2, cat3] = topCategories;
   const periodLabel = fmtPeriodLabel(range);
@@ -258,6 +265,27 @@ export async function buildEbrTokenData(
     WF_INVOICE_VALUE: fmtMoneyM(invoices.totalValue),
     WF_ACTIVE_USERS: fmtInt(footprint.activeUserCount),
   };
+
+  // "Recommended Priorities" slide — deterministic signals (real numbers only), optionally
+  // rewritten/personalized by the AI engine using Zuper product knowledge + website context
+  // for tone. See ai.generateBusinessRecommendations for the grounding guarantee.
+  const signals = computeRecommendationSignals({
+    quotesTotal: quotes.total,
+    quotesAcceptanceRate: quotes.accepted.rate,
+    quotesOpenValue: quotes.open.value,
+    invoicesAgedOver60Count: invoices.open.agedOver60Count,
+    invoicesAgedOver60Value: invoices.open.agedOver60Value,
+    onlinePaymentShare: payments.onlineShare,
+    paymentsTotalValue: payments.totalAmount,
+    activeWorkflowCount: workflowSummary.active,
+    totalWorkflowCount: workflowSummary.total,
+    jobsTotal: jobs.total,
+  });
+  const recommendations = await generateBusinessRecommendations(signals, websiteContext, reportTitle);
+  recommendations.forEach((rec, i) => {
+    tokens[`REC${i + 1}_TITLE`] = rec.title;
+    tokens[`REC${i + 1}_DESC`] = rec.description;
+  });
 
   const acceptedByQuarter = quarters.map((q) => Math.round(q.quotesAcceptedValue / 10_000) / 100);
   const declinedByQuarter = quarters.map((q) => Math.round(q.quotesDeclinedValue / 10_000) / 100);

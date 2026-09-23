@@ -1,4 +1,4 @@
-import Anthropic from "@anthropic-ai/sdk";
+import { GoogleGenAI } from "@google/genai";
 import type {
   PeriodMetrics,
   ComparisonResult,
@@ -10,20 +10,25 @@ import type {
   TechnicianRanking,
   KeyInsights,
 } from "@/lib/analytics";
+import type { RecommendationSignal } from "@/lib/reports/ebrMetrics";
+import type { WebsiteContext } from "@/lib/website";
+import { ZUPER_PRODUCT_KNOWLEDGE } from "@/lib/zuperProductKnowledge";
 
-const SYSTEM_PROMPT = `You are writing content for a Zuper customer business review (QBR/MBR).
+const SYSTEM_PROMPT = `You are writing content for a Zuper customer business review (QBR/MBR/HBR).
 You will be given a JSON object of pre-computed metrics. Write only about numbers present in
 that JSON, using them exactly as given — never calculate, round differently, or invent a number.
 If a metric needed to support a claim isn't in the JSON, don't make the claim. Tone: confident,
 concise, written for an account's stakeholders and the CSM team presenting it. No markdown, no
 bullet points — plain prose paragraphs only.`;
 
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+
 export function aiEnabled(): boolean {
-  return Boolean(process.env.ANTHROPIC_API_KEY);
+  return Boolean(process.env.GEMINI_API_KEY);
 }
 
-function client(): Anthropic {
-  return new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+function client(): GoogleGenAI {
+  return new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 }
 
 /** Rejects output containing a number that doesn't appear anywhere in the input JSON (guards against invented figures). */
@@ -38,6 +43,16 @@ function validateNoInventedNumbers(text: string, inputJson: unknown): boolean {
   return true;
 }
 
+async function callGemini(systemInstruction: string, prompt: string, maxOutputTokens: number): Promise<string> {
+  const ai = client();
+  const res = await ai.models.generateContent({
+    model: GEMINI_MODEL,
+    contents: prompt,
+    config: { systemInstruction, maxOutputTokens },
+  });
+  return (res.text ?? "").trim();
+}
+
 async function generate(
   userPrompt: string,
   inputJson: unknown,
@@ -46,22 +61,23 @@ async function generate(
 ): Promise<string> {
   if (!aiEnabled()) return fallback();
 
-  const anthropic = client();
   for (let attempt = 0; attempt < 2; attempt++) {
-    const res = await anthropic.messages.create({
-      model: "claude-sonnet-4-5",
-      max_tokens: maxTokens,
-      system: SYSTEM_PROMPT,
-      messages: [{ role: "user", content: `${userPrompt}\n\nMetrics JSON:\n${JSON.stringify(inputJson, null, 2)}` }],
-    });
-    const text = res.content.filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
-    if (validateNoInventedNumbers(text, inputJson)) return text;
+    try {
+      const text = await callGemini(
+        SYSTEM_PROMPT,
+        `${userPrompt}\n\nMetrics JSON:\n${JSON.stringify(inputJson, null, 2)}`,
+        maxTokens
+      );
+      if (validateNoInventedNumbers(text, inputJson)) return text;
+    } catch {
+      // network/API error — fall through to retry, then fallback
+    }
   }
   return fallback();
 }
 
 // ---------------------------------------------------------------------------
-// Template fallbacks — used whenever ANTHROPIC_API_KEY isn't set. Every
+// Template fallbacks — used whenever GEMINI_API_KEY isn't set. Every
 // number here is read straight off the computed metrics, so the report is
 // fully usable (just less polished prose) without any AI key at all.
 // ---------------------------------------------------------------------------
@@ -222,4 +238,98 @@ export async function generateRecommendation(sectionKey: string, rule: RuleMatch
     { rule },
     () => templateRecommendation(rule)
   );
+}
+
+// ---------------------------------------------------------------------------
+// Business-aware recommendations for the "Recommended Priorities" slide.
+// Grounded in: (1) computeRecommendationSignals()'s deterministic signals —
+// the ONLY numbers the AI is allowed to use, (2) a curated Zuper product
+// reference so recommendations name real features/mechanics correctly, and
+// (3) best-effort customer website context, for framing/tone only — never a
+// source of numbers, so validateNoInventedNumbers() doesn't check against it.
+// ---------------------------------------------------------------------------
+
+export interface BusinessRecommendation {
+  title: string;
+  description: string;
+}
+
+const GENERIC_FILLERS: BusinessRecommendation[] = [
+  {
+    title: "Establish a Recurring Reporting Cadence",
+    description: "Set a regular cadence for reviewing account health in Zuper Sense so decisions stay backed by data, not gut feel.",
+  },
+  {
+    title: "Confirm Seat Utilization at Renewal",
+    description: "Review licensed seats against actual login/job activity ahead of renewal to right-size the account.",
+  },
+  {
+    title: "Explore Additional Modules",
+    description: "Ask your CSM whether Zuper Connect, Customer Portal, or Report Builder fit the account's next stage of growth.",
+  },
+  {
+    title: "Revisit Workflow Automation",
+    description: "As job volume grows, periodically re-check which manual steps could move into Workflow Builder.",
+  },
+];
+
+function fillToFour(signals: BusinessRecommendation[]): BusinessRecommendation[] {
+  const out = [...signals];
+  let fillerIdx = 0;
+  while (out.length < 4 && fillerIdx < GENERIC_FILLERS.length) {
+    out.push(GENERIC_FILLERS[fillerIdx]);
+    fillerIdx += 1;
+  }
+  return out.slice(0, 4);
+}
+
+export async function generateBusinessRecommendations(
+  signals: RecommendationSignal[],
+  websiteContext: WebsiteContext | null,
+  reportTypeLabel: string
+): Promise<BusinessRecommendation[]> {
+  const fallback = () => fillToFour(signals.map((s) => ({ title: s.title, description: s.detail })));
+
+  if (!aiEnabled() || signals.length === 0) return fallback();
+
+  const businessContext = websiteContext
+    ? {
+        websiteTitle: websiteContext.title,
+        websiteDescription: websiteContext.description,
+        websiteExcerpt: websiteContext.excerpt.slice(0, 2000),
+      }
+    : null;
+
+  const inputJson = { signals, reportTypeLabel };
+
+  const prompt = `Rewrite these ${signals.length} data-backed recommendation signal(s) for a ${reportTypeLabel} "Recommended Priorities" slide.
+For EACH signal, produce a short punchy title (max 6 words) and a 1-2 sentence description that keeps every number in "detail" exactly as given.
+You may use the business context below ONLY to adjust tone/framing (e.g. reference the kind of business this is) — never to invent a number or a fact not in the signals.
+${businessContext ? `\nBusiness context (from the customer's own website, for tone only):\n${JSON.stringify(businessContext, null, 2)}` : ""}
+
+Respond with ONLY a JSON array, no markdown fences, no other text, in this exact shape:
+[{"title": "...", "description": "..."}, ...]`;
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const text = await callGemini(
+        `${SYSTEM_PROMPT}\n\n${ZUPER_PRODUCT_KNOWLEDGE}`,
+        `${prompt}\n\nSignals JSON:\n${JSON.stringify(inputJson, null, 2)}`,
+        800
+      );
+      if (!validateNoInventedNumbers(text, inputJson)) continue;
+
+      const cleaned = text.replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
+      const parsed = JSON.parse(cleaned);
+      if (
+        Array.isArray(parsed) &&
+        parsed.every((p) => typeof p?.title === "string" && typeof p?.description === "string")
+      ) {
+        return fillToFour(parsed as BusinessRecommendation[]);
+      }
+    } catch {
+      // parse/network failure — retry once, then fall back
+    }
+  }
+  return fallback();
 }

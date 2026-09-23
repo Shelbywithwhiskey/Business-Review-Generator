@@ -30,16 +30,18 @@ function replaceTokens(xml: string, tokens: Record<string, string>): string {
 export interface GenerateEbrPptxOptions {
   customerId: string;
   customerName: string;
+  /** Best-effort business context source — see lib/website.ts. Null/undefined is fine (just no context). */
+  customerWebsite?: string | null;
   range: DateRange;
   reportTitle: string;
 }
 
 export async function generateEbrPptx(options: GenerateEbrPptxOptions): Promise<Buffer> {
-  const { customerId, customerName, range, reportTitle } = options;
+  const { customerId, customerName, customerWebsite, range, reportTitle } = options;
 
   const [templateBuffer, { tokens, charts }] = await Promise.all([
     readFile(TEMPLATE_PATH),
-    buildEbrTokenData(customerId, customerName, range, reportTitle),
+    buildEbrTokenData(customerId, customerName, customerWebsite ?? null, range, reportTitle),
   ]);
 
   const zip = await JSZip.loadAsync(templateBuffer);

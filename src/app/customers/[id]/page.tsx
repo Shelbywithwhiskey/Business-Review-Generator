@@ -8,9 +8,16 @@ interface Customer {
   id: string;
   name: string;
   zuperAccountId: string;
+  website: string | null;
   credential: { baseUrl: string; lastVerifiedAt: string | null } | null;
   syncRuns: { id: string; status: string; periodStart: string; periodEnd: string; errorMessage: string | null; createdAt: string }[];
 }
+
+const REPORT_TYPE_LABELS: Record<string, string> = {
+  QBR: "Quarterly (QBR)",
+  MBR: "Monthly (MBR)",
+  HBR: "Half-Year (HBR)",
+};
 
 function defaultPeriod() {
   const end = new Date();
@@ -33,10 +40,29 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
   const [metrics, setMetrics] = useState<any | null>(null);
   const [loadingMetrics, setLoadingMetrics] = useState(false);
   const [generatingReport, setGeneratingReport] = useState(false);
+  const [website, setWebsite] = useState("");
+  const [savingWebsite, setSavingWebsite] = useState(false);
+  const [reportType, setReportType] = useState<"QBR" | "MBR" | "HBR">("QBR");
 
   async function loadCustomer() {
     const res = await fetch(`/api/customers/${id}`);
-    if (res.ok) setCustomer((await res.json()).customer);
+    if (res.ok) {
+      const c = (await res.json()).customer;
+      setCustomer(c);
+      setWebsite(c.website ?? "");
+    }
+  }
+
+  async function saveWebsite(e: React.FormEvent) {
+    e.preventDefault();
+    setSavingWebsite(true);
+    await fetch(`/api/customers/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ website }),
+    });
+    setSavingWebsite(false);
+    await loadCustomer();
   }
 
   useEffect(() => {
@@ -104,7 +130,7 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
     const res = await fetch(`/api/customers/${id}/reports`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ periodStart: period.start, periodEnd: period.end }),
+      body: JSON.stringify({ periodStart: period.start, periodEnd: period.end, type: reportType }),
     });
     setGeneratingReport(false);
     if (res.ok) {
@@ -132,6 +158,29 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
           <h1 className="text-lg font-semibold">{customer.name}</h1>
           <p className="text-sm text-neutral-500">Zuper account: {customer.zuperAccountId}</p>
         </div>
+
+        <section className="rounded-lg border border-neutral-200 p-5 dark:border-neutral-800">
+          <h2 className="mb-3 font-medium">Company website</h2>
+          <p className="mb-3 text-xs text-neutral-500">
+            Best-effort scraped for business context (industry, services) to ground AI-generated recommendations.
+            Never used as a source of numbers.
+          </p>
+          <form onSubmit={saveWebsite} className="flex gap-2">
+            <input
+              value={website}
+              onChange={(e) => setWebsite(e.target.value)}
+              placeholder="acmefieldservices.com"
+              className="flex-1 rounded-md border border-neutral-300 px-3 py-2 text-sm dark:border-neutral-700 dark:bg-neutral-900"
+            />
+            <button
+              type="submit"
+              disabled={savingWebsite}
+              className="rounded-md border border-neutral-300 px-3 py-2 text-sm disabled:opacity-50 dark:border-neutral-700"
+            >
+              {savingWebsite ? "Saving…" : "Save"}
+            </button>
+          </form>
+        </section>
 
         <section className="rounded-lg border border-neutral-200 p-5 dark:border-neutral-800">
           <h2 className="mb-3 font-medium">Zuper API connection</h2>
@@ -317,13 +366,26 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
               </ul>
             </div>
 
-            <button
-              onClick={generateReport}
-              disabled={generatingReport}
-              className="mt-5 rounded-md bg-neutral-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-neutral-100 dark:text-neutral-900"
-            >
-              {generatingReport ? "Generating report…" : "Generate QBR"}
-            </button>
+            <div className="mt-5 flex items-center gap-2">
+              <select
+                value={reportType}
+                onChange={(e) => setReportType(e.target.value as "QBR" | "MBR" | "HBR")}
+                className="rounded-md border border-neutral-300 px-2 py-2 text-sm dark:border-neutral-700 dark:bg-neutral-900"
+              >
+                {Object.entries(REPORT_TYPE_LABELS).map(([value, label]) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+              <button
+                onClick={generateReport}
+                disabled={generatingReport}
+                className="rounded-md bg-neutral-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-neutral-100 dark:text-neutral-900"
+              >
+                {generatingReport ? "Generating report…" : `Generate ${reportType}`}
+              </button>
+            </div>
           </section>
         )}
       </main>

@@ -175,6 +175,78 @@ export async function computeAllJobCategories(customerId: string, range: DateRan
   return computeTopJobCategories(customerId, range, Infinity);
 }
 
+export interface RecommendationSignal {
+  key: string;
+  /** Short, punchy heading — safe to show as-is if the AI engine is disabled/unavailable. */
+  title: string;
+  /** Full sentence with the real numbers already filled in — this is what the AI engine
+   * is allowed to rewrite/personalize, and what validateNoInventedNumbers() checks against. */
+  detail: string;
+}
+
+export interface RecommendationEvidence {
+  quotesTotal: number;
+  quotesAcceptanceRate: number;
+  quotesOpenValue: number;
+  invoicesAgedOver60Count: number;
+  invoicesAgedOver60Value: number;
+  onlinePaymentShare: number;
+  paymentsTotalValue: number;
+  activeWorkflowCount: number;
+  totalWorkflowCount: number;
+  jobsTotal: number;
+}
+
+/**
+ * Deterministic candidate recommendations ranked by how strongly the account's own
+ * numbers support each one. Always returns up to 4 signal-backed items; callers pad
+ * with an evergreen filler (e.g. "establish a regular reporting cadence") if fewer
+ * than 4 signals fire. This is the fallback used verbatim when the AI engine is off,
+ * and the only numeric grounding the AI engine is allowed to draw on when it's on.
+ */
+export function computeRecommendationSignals(evidence: RecommendationEvidence): RecommendationSignal[] {
+  const signals: RecommendationSignal[] = [];
+
+  if (evidence.quotesTotal >= 5 && evidence.quotesAcceptanceRate < 0.3 && evidence.quotesOpenValue > 0) {
+    signals.push({
+      key: "quote_conversion_low",
+      title: "Improve Quote Follow-Up",
+      detail: `Only ${(evidence.quotesAcceptanceRate * 100).toFixed(0)}% of ${evidence.quotesTotal} quotes converted this period, leaving $${(evidence.quotesOpenValue / 1_000_000).toFixed(2)}M in open pipeline value — tighter follow-up and tiered (Good-Better-Best) proposals are the fastest lever here.`,
+    });
+  }
+
+  if (evidence.invoicesAgedOver60Value > 5000) {
+    signals.push({
+      key: "invoice_aging_high",
+      title: "Turn On Zuper Pay",
+      detail: `$${(evidence.invoicesAgedOver60Value / 1_000_000).toFixed(2)}M across ${evidence.invoicesAgedOver60Count} invoice(s) is aged over 60 days — Zuper Pay's Tap-to-Pay and payment links speed up collections directly from the invoice.`,
+    });
+  } else if (evidence.paymentsTotalValue > 20000 && evidence.onlinePaymentShare < 0.2) {
+    signals.push({
+      key: "zuper_pay_opportunity",
+      title: "Turn On Zuper Pay",
+      detail: `$${(evidence.paymentsTotalValue / 1_000_000).toFixed(2)}M in payments were collected this period with only ${(evidence.onlinePaymentShare * 100).toFixed(0)}% paid digitally — Zuper Pay consolidates this with lower fees and faster payout.`,
+    });
+  }
+
+  if (evidence.totalWorkflowCount === 0 && evidence.jobsTotal > 50) {
+    signals.push({
+      key: "no_workflows",
+      title: "Adopt Workflow Builder",
+      detail: `${evidence.jobsTotal} jobs ran this period with zero automation configured — Workflow Builder removes manual re-entry across status changes, notifications, and record syncing.`,
+    });
+  } else if (evidence.totalWorkflowCount > 0 && evidence.activeWorkflowCount < evidence.totalWorkflowCount) {
+    const inactive = evidence.totalWorkflowCount - evidence.activeWorkflowCount;
+    signals.push({
+      key: "inactive_workflows",
+      title: "Review Inactive Workflows",
+      detail: `${inactive} of ${evidence.totalWorkflowCount} configured workflow(s) are currently inactive — worth a quick review to confirm they're intentionally retired rather than quietly broken.`,
+    });
+  }
+
+  return signals;
+}
+
 export interface WorkflowRow {
   name: string;
   isActive: boolean;

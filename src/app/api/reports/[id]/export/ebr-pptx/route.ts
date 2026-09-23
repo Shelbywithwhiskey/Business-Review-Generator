@@ -9,15 +9,21 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
 
   const report = await prisma.report.findUnique({
     where: { id },
-    include: { customer: { select: { id: true, name: true } } },
+    include: { customer: { select: { id: true, name: true, website: true } } },
   });
   if (!report) return NextResponse.json({ error: "Report not found" }, { status: 404 });
 
-  const reportTitle = report.type === "QBR" ? "Quarterly Business Review" : "Executive Business Review";
+  const reportTitle =
+    report.type === "QBR"
+      ? "Quarterly Business Review"
+      : report.type === "MBR"
+        ? "Monthly Business Review"
+        : "Half-Year Business Review";
 
   const buffer = await generateEbrPptx({
     customerId: report.customer.id,
     customerName: report.customer.name,
+    customerWebsite: report.customer.website,
     range: { start: report.periodStart, end: report.periodEnd },
     reportTitle,
   });

@@ -22,6 +22,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     data: {
       name: body.name,
       zuperAccountId: body.zuperAccountId,
+      website: body.website === "" ? null : body.website,
       notes: body.notes,
     },
   });

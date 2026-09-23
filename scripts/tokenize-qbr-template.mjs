@@ -273,6 +273,34 @@ async function main() {
     { kind: "insertAfterText", marker: "Contracted users:", token: "N/A", rPrXml: ACTIVE_CONTRACTED_VALUE, label: "Contracted users (not exposed by API)" },
   ]);
 
+  // ---- Slide 28: Recommended Priorities — 4 title/description cards, AI-generated (see lib/ai.ts) ----
+  await tokenizeSlide(zip, "ppt/slides/slide28.xml", [
+    { kind: "replace", old: "<a:t>Activate the Lead &amp; Pipeline Module</a:t>", token: "<a:t>{{REC1_TITLE}}</a:t>" },
+    {
+      kind: "replace",
+      old: "Turn on Opportunity tracking, source tagging, and pipeline visibility to start converting the $1.05M in currently untracked lost-deal value.",
+      token: "{{REC1_DESC}}",
+    },
+    { kind: "replace", old: "<a:t>Turn On Zuper Pay</a:t>", token: "<a:t>{{REC2_TITLE}}</a:t>" },
+    {
+      kind: "replace",
+      old: "Already active on Connect but not Pay — enabling it unlocks lower transaction fees than the current provider, at no migration cost.",
+      token: "{{REC2_DESC}}",
+    },
+    { kind: "replace", old: "<a:t>Expand CPQ to Good-Better-Best Proposals</a:t>", token: "<a:t>{{REC3_TITLE}}</a:t>" },
+    {
+      kind: "replace",
+      old: "Move beyond single-option quotes to tiered proposals — directly aligned with leadership's stated interest in presenting more options to customers.",
+      token: "{{REC3_DESC}}",
+    },
+    { kind: "replace", old: "<a:t>Establish a Recurring Sense Reporting Cadence</a:t>", token: "<a:t>{{REC4_TITLE}}</a:t>" },
+    {
+      kind: "replace",
+      old: "Set a monthly leadership dashboard cycle in Zuper Sense so growth decisions ahead of the 20-state expansion are backed by data, not gut feel.",
+      token: "{{REC4_DESC}}",
+    },
+  ]);
+
   await mkdir(path.dirname(OUT_PATH), { recursive: true });
   const outBuffer = await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
   await writeFile(OUT_PATH, outBuffer);
