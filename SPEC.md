@@ -1,9 +1,17 @@
-# Zuper Customer Business Review (CBR) Generator — MVP Spec
+# Zuper Customer Business Review (CBR) Generator — Customer Value Spec
 
 Internal tool for Zuper CSMs: enter a customer's Zuper API key, pull account
-data, compute metrics deterministically, generate AI narrative/recommendations
-on top of those computed numbers, and produce an editable, boardroom-ready
-QBR or MBR (PDF/PPTX).
+data and approved baseline evidence, compute metrics deterministically, and
+produce an editable EBR, QBR, HBR, or MBR (PDF/PPTX) showing the customer's
+progress against agreed business goals and the supported contribution of Zuper.
+AI writes narrative/recommendations from computed evidence.
+
+**Customer-value revision — 2026-09-23:** Section 14 defines the required
+measurement and extraction behavior. Its customer-value requirements take
+precedence over the original MVP's generic activity reporting, health-score,
+and product-opportunity defaults. This document describes the intended build;
+the uploaded files do not include the connector, analytics implementation,
+database schema file, or account data needed to verify or implement runtime changes.
 
 Core rule baked into the architecture: **the app calculates every number.
 The AI only interprets numbers it is handed — it never computes or invents
@@ -296,7 +304,9 @@ model ReportTemplate {
 }
 
 enum ReportType {
+  EBR
   QBR
+  HBR
   MBR
 }
 
@@ -369,6 +379,8 @@ export const MODULE_REGISTRY: ModuleAdapter[] = [
 ```
 
 - Each adapter owns pagination, rate-limit backoff, and field mapping.
+- Customer-value extraction must also preserve cross-module relationships,
+  timestamped events, source coverage, and historical state as described in §14.
 - `syncZuperData` worker job iterates `MODULE_REGISTRY` (filtered to
   `SyncRun.modules`), upserts normalized rows keyed by
   `(customerId, zuperXId)`, and updates `SyncRun.status`.
@@ -395,7 +407,8 @@ src/
   comparisons.ts       // diff current vs previous_period / yoy, % change
   rankings.ts           // top-N technicians, sorted rollups
   healthScore.ts         // weighted dimension scoring (see §8)
-  opportunityEngine.ts    // rule-based signals (see §9)
+    opportunityEngine.ts    // rule-based signals (see §9)
+    valueEngine.ts          // baseline comparisons, evidence labels, benefit ledger (see §14)
   rulesEngine.ts           // threshold rules that trigger recommendation prompts
 ```
 
@@ -474,6 +487,12 @@ All AI output lands in `ReportSection.narrativeText` /
 overwrite it in the Report Editor, which sets `isEdited = true` and skips
 regeneration on that section going forward.
 
+For customer-facing value claims, numeric membership alone is insufficient.
+Every claim must reference its computed metric/evidence ID and preserve its
+unit, period, cohort, comparison direction, estimation label, and attribution
+limits. The AI cannot turn observed activity or a before/after association
+into financial savings or a causal claim. See §14 for output restrictions.
+
 ---
 
 ## 7. Report Builder & Template Editor (`packages/report-builder`)
@@ -506,11 +525,21 @@ editor WYSIWYG and the exported file are guaranteed to match.
 
 Default templates seeded at first run:
 
-- **QBR**: Cover → Executive Summary → Customer Health → Business
-  Performance (jobs+invoices+payments) → Technician Performance → Product
-  Adoption → Opportunities → Recommendations → Next-Quarter Plan
-- **MBR**: Cover → Monthly Performance → KPI Movement → Operational Metrics
-  → Issues → Adoption → Recommendations → Next-Month Priorities
+- **EBR**: Cover → Agreed Business Goals → Value Delivered → Financial and
+  Capacity Benefits → Supporting Evidence → Decisions → Joint Success Plan
+- **QBR**: Cover → Goals and Progress → Value Delivered → Operational
+  Drivers → Relevant Workflow Adoption → Action Review → Next-Quarter Plan
+- **HBR** (half-yearly, confirm account terminology): Cover → Goals →
+  Six-Month Value Trend → Comparable Seasonal Results → Progress Since
+  Previous Commitments → Next-Half Priorities
+- **MBR**: Cover → Goal Progress → Operational Drivers → Actions and
+  Outcomes → Next-Month Priorities
+
+Store audience (`executive` or `operational`) separately from cadence and
+explicit period dates; an executive review may be quarterly or half-yearly.
+The legacy report type can select a default template but must not prevent
+that combination. Internal renewal risk and sales opportunity sections are
+excluded from customer-facing templates by default.
 
 Template editor UI operations (all persisted to `ReportTemplate.sections`):
 add/delete/reorder section, rename section, add/remove component within a
@@ -560,7 +589,7 @@ evidence used, then handed to the AI engine for narrative only:
 3. **Customer Setup** — name, Zuper account ID, API key entry (write-only field), "Test Connection"
 4. **Customer Detail** — sync history, raw metrics browser, "Analyze Account" CTA
 5. **Analyze Account** — date range, module selection, compare-mode toggle, live sync progress (polls `SyncRun`)
-6. **Report Wizard** — choose QBR/MBR, template, period → creates `Report` + generates all sections
+6. **Report Wizard** — choose audience, cadence, template, period, goals, and baseline → creates `Report` + generates supported value sections
 7. **Report Editor** — section-by-section WYSIWYG: KPI cards, charts, tables, narrative + recommendation text (editable), "Regenerate with AI" per section
 8. **Template Editor** — drag-and-drop section/component builder (dnd-kit), branding controls, save/duplicate
 9. **Report Preview / Export** — final render, export PDF/PPTX, generate share link
@@ -674,3 +703,244 @@ zuper-cbr-generator/
 **Phase 2 (post-MVP):** quotes conversion deep-dive, projects, inventory,
 forms/checklists, workflows/automation module, Zuper Connect opportunity
 detector, multi-customer portfolio rollups.
+
+---
+
+## 14. Customer Value Measurement and Data Pull Requirements
+
+### 14.1 Purpose and scope
+
+Answer: "What has improved for this customer, what contribution from Zuper
+is supported by evidence, and what should improve next?" Select one to three
+headline outcomes based on the account's agreed goals. Activity and adoption
+are supporting evidence. A module being enabled or processing a large volume
+does not establish time savings, incremental revenue, or return on investment.
+
+The application must distinguish:
+
+- **Observed activity:** work or transactions recorded in Zuper.
+- **Observed improvement:** a measured change against a comparable baseline;
+  other explanations may remain.
+- **Estimated benefit:** a modeled result using visible assumptions.
+- **Verified financial benefit:** a documented financial result with supported
+  attribution and evidence for the claimed cost or margin change.
+- **Insufficient data:** a required source, baseline, relationship, or field
+  is unavailable. Render the reason; never substitute a zero or an AI estimate.
+
+No account results or savings figures are asserted by this specification.
+
+### 14.2 Account value profile and baseline setup
+
+Before calculating value, capture:
+
+1. Account ID, reporting timezone, currency, business units, service categories,
+   billing model, relevant integrations, and permitted data sources.
+2. Zuper go-live date and dated rollout/activation records for the specific
+   workflows or features being evaluated, including phased team adoption.
+3. One to three agreed goals, metric definitions, responsible owners, and
+   customer-agreed targets. Avoid universal default savings or health targets.
+4. Reporting period and baseline period, baseline source, observation cutoff,
+   comparability notes, and historical completeness.
+5. Optional validated manual task timings, loaded hourly labor costs, actual
+   expense records, subscription costs, implementation costs, and ongoing
+   operating costs. Record units, currency, effective dates, and source.
+6. Evaluation horizon for quote conversion, collection, and callbacks; local
+   SLAs, eligibility rules, exclusions, and original/revised promise rules.
+
+Baseline preference: comparable pre-Zuper records; otherwise a dated feature
+rollout with valid prior history; otherwise the earliest stable measured
+period, labeled "change since baseline." Pre-Zuper evidence may require an
+old-system export or customer-supplied records. Manual estimates are labeled
+as assumptions. If no credible baseline exists, show current performance,
+establish a baseline, and suppress improvement/ROI claims.
+
+Normalize comparisons for service mix, staffing, working days, seasonality,
+and relevant changes in pricing or scope. For phased rollouts, compare similar
+teams where suitable; record remaining selection bias. Simple before/after
+comparisons support association and do not alone prove causation.
+
+### 14.3 Data extraction plan
+
+The names below are proposed normalized fields, not assertions about Zuper
+API response keys. Confirm each mapping from a permitted representative
+response or export. Product UI availability does not guarantee API access.
+
+| Source family | Preserve or acquire | Customer value supported |
+| --- | --- | --- |
+| Jobs and status history | Stable job ID; creation; original and revised schedule/deadline; actual start/completion; dated status changes and holds; category; team; assigned users; end-customer/organization/property/asset IDs; billable scope; parent/return links and reasons | Timeliness, throughput, bottlenecks, callbacks, and billing eligibility |
+| Quotes/estimates | Stable quote and revision IDs; sent/accepted/declined/expiry events; valid amount/currency; linked jobs and end customers | Quote response, mature-cohort conversion, and accepted work progression |
+| Invoices and allocations | Invoice ID; linked jobs/quotes; issue/due dates; line amounts; taxes/discounts; credits/voids; allocation amounts and event dates | Billing delay, billing completeness, collection performance |
+| Payments and adjustments | Transaction and allocation IDs; invoice links; attempt/success/settlement dates where available; status; provider/method; refunds/disputes/reversals; amount/currency | Payment friction, net collections, historical outstanding balances |
+| Timelogs, shifts, and time off | Person/job IDs; work/travel intervals; corrections; shift availability; approved leave | Capacity, labor-hour productivity, and travel burden |
+| Forms and inspections | Form/template version; applicable conditional requirements; answers; attachments/signatures; completion dates; failure/corrective-action links | Documentation completeness, corrective actions, and reduced rework |
+| Workflow and integration logs | Workflow/version; trigger and run IDs; job/record links; retries; unique successful business outcomes; failure/manual-intervention events | Reliable automation and eligible manual steps displaced |
+| Product activity and entitlements | Eligible users and roles; dated entitlements/activation; meaningful human actions; integration/service-account identification | Adoption of the workflows expected to deliver the selected goals |
+| Assets and contracts | Customer/property/asset links; scheduled service obligations; contract dates, status, renewal history | Preventive-maintenance compliance and recurring-service continuity |
+| External/account inputs | Pre-Zuper exports; validated manual timings; payroll/cost evidence; survey results if used; implementation/subscription costs; goals | Baselines, monetary valuation, customer experience, and ROI |
+
+Start with verified permitted Zuper APIs/exports for operational records.
+Discover separately whether workflow executions, detailed product activity,
+and entitlements are available through account APIs, report exports, or an
+authorized internal source. Never infer execution counts from workflow
+definitions, logins from job counts, or non-use from a missing permission.
+
+Extractor behavior:
+
+- Pull both reporting and baseline cohorts, all older open work/receivables
+  needed for as-of balances, and linked records outside the selected period.
+- Include the required lookback and follow-up windows for each metric. Do not
+  compare immature current cohorts with fully observed historical cohorts.
+- Use pagination, account-specific permissions, rate-limit handling, and
+  incremental updates with a documented watermark. Reconcile changed/voided
+  records; an upsert of current state is not a historical event ledger.
+- Retain account-scoped stable IDs and allocation/association tables for
+  many-to-many links. Prevent duplicated amounts when joining jobs, invoices,
+  payments, and multiple technicians. Mark unmatched relationships explicitly.
+- Record source, fetched/updated times, event cutoff, row counts, missingness,
+  eligible sample size, and sync completeness for every measurement.
+- Treat unavailable values as null with a reason. Keep currencies separate
+  unless a dated, documented conversion method is explicitly configured.
+
+### 14.4 Value metric definitions
+
+Select headline metrics from the customer's goals; the remaining metrics
+provide diagnosis. Agree eligibility and observation rules before comparison.
+
+| Metric | Deterministic calculation | Interpretation and guardrail |
+| --- | --- | --- |
+| Administrative capacity released | Sum over distinct successfully displaced manual steps of `(validated baseline human minutes - current human minutes) / 60` | Estimated hours, unless direct comparable time measurement supports an observed difference. Deduplicate retries and overlapping steps; preserve negative changes as additional effort. Waiting time is not human work time. |
+| Timely billing | Eligible jobs whose billing deadline falls in the period and whose required billable scope is covered by valid invoices before that deadline / all eligible jobs with billing deadlines in the period | Includes jobs still uninvoiced when due. Account for deposits, partial billing, credit notes, warranty/nonbillable work, and billing outside Zuper. |
+| Completion-to-billing delay | Median and 90th percentile of elapsed time from completion to invoice coverage of the required billable scope | Show billed-cohort size and uninvoiced job count/age alongside the duration. If coverage predates completion, record zero post-completion delay and flag advance billing. If only first-invoice dates exist, label that limited metric explicitly. |
+| Collection within the agreed horizon | Allocated net collections received within the agreed interval after issue / collectible amount of invoices in the same fully observed issue cohort | Use dated allocations and adjustments with the agreed credit/refund treatment. Show unpaid invoices; separate invoices, collected cash, and accounting revenue. |
+| On-time completion | Eligible jobs completed by the agreed deadline / eligible jobs due in the period | Include overdue unfinished work. Apply documented cancellation rules; retain original promises so schedule changes do not silently improve performance. |
+| Callback rate | Eligible completed original jobs with an unplanned same-issue callback within the agreed horizon / eligible original jobs with the full observation horizon | Require reliable links and reasons. Exclude planned multi-visit work, recurring maintenance, and unrelated issues at the same customer/property. Pair with throughput improvements. |
+| Labor-hour productivity | Completed comparable work units / corresponding recorded labor hours, using a consistent work cohort and service grouping | Treat incomplete time logging as a coverage limitation. Report work-in-progress effort separately; use comparable categories or agreed workload weights. This measures output per labor hour, not financial savings. |
+| Documentation completeness | Eligible jobs meeting every applicable required question/photo/signature requirement at the defined checkpoint / all eligible jobs at that checkpoint | Evaluate conditional branches and template version. Missing documentation can explain delay but does not alone prove it caused the delay. |
+| Quote acceptance within the agreed horizon | Distinct eligible sent quotes accepted within the agreed horizon / distinct eligible sent quotes with full follow-up | Deduplicate revisions and use the same cohort/horizon in both periods. Show value separately and preserve pricing/service-mix differences. |
+| Workflow adoption | Eligible jobs completing the agreed applicable digital steps / all eligible jobs | Supporting evidence for value. Use human activity records for user engagement and distinguish integration-generated activity. |
+
+For every comparison retain baseline/current numerator, denominator, coverage,
+duration distribution where relevant, excluded counts, absolute change, and
+relative change. Express rate differences in percentage points. Relative
+change is null when the baseline is zero; negative results remain visible.
+
+### 14.5 Monetary valuation and ROI
+
+Maintain a benefit ledger, with one row per independently evidenced benefit,
+including source records, period, type, attribution, assumptions, and an
+overlap key. Deduplicate benefits before aggregation.
+
+- `estimated capacity value = estimated hours released * validated loaded
+  hourly cost`. Label it capacity value. It becomes realized expense savings
+  only when actual payroll, overtime, contractor, or other cost records
+  demonstrate the reduction with a supported attribution method.
+- A lower callback rate can support an estimated avoided-rework scenario:
+  `(baseline rate - current rate) * comparable current eligible job count *
+  validated cost per callback`. Label the counterfactual assumptions and
+  avoid counting the same labor savings in automation/capacity totals.
+- Faster collection is a cash-timing benefit. Invoice totals, payment volume,
+  outstanding receivables, and cash accelerated are not incremental revenue
+  or profit. Potential unbilled work is an opportunity until its outcome is
+  documented; it is not realized value already delivered.
+- Higher throughput or quote acceptance is an observed operational result.
+  Monetizing it requires evidenced incremental work, associated costs/margin,
+  attribution, and confirmation it was not merely displaced from another period.
+- Calculate realized ROI only when independently verified, non-overlapping
+  attributable financial benefits and corresponding Zuper costs are available:
+  `(verified attributable financial benefits - total Zuper costs) /
+  total Zuper costs * 100`, with a positive cost denominator.
+- If a customer requests a modeled ROI, label it as an estimate and expose
+  assumptions/sensitivity. Keep modeled capacity value separate from realized
+  cash savings. Include subscription, implementation, and ongoing costs on
+  the same period basis with any amortization disclosed.
+
+Do not produce a single financial "value delivered" total by adding revenue,
+cash collected, capacity value, and expense savings together.
+
+### 14.6 Schema and metric contract additions
+
+Implement these concepts in the actual application after its source/schema
+is available; this is a design contract rather than an applied migration:
+
+- `ValueProfile`: account goals, rollout dates, baseline references,
+  applicability rules, timezone/currency, and valuation inputs.
+- `BaselineReference`: evidence/source, period, measured versus assumed flag,
+  owner, comparability notes, and metric-definition version.
+- `EndCustomer`, `Organization`, `Property`, `Asset`: preserve the distinction
+  from the existing `Customer` model, which denotes the Zuper tenant/account.
+- Timestamped operational events, job-user assignments, quote-job links,
+  job-invoice allocations, invoice-payment allocations, and adjustments.
+- Versioned `ValueMeasurement`: metric ID, account, goal, period/baseline,
+  nullable value, unit, numerator/denominator, coverage, source IDs, cutoff,
+  method version, evidence classification, attribution limits, and explanation.
+- `BenefitLedgerEntry`: amount/hours, currency/unit, valuation assumptions,
+  benefit type, period, source links, and overlap/deduplication key.
+- `SuccessAction`: prior recommendation, responsible owner, due date, target,
+  completion evidence, and measured outcome at the next review.
+
+The legacy `MetricSnapshot.value` non-null decimal is insufficient to encode
+missing or non-comparable evidence. Add an appropriate status/nullability
+contract; never coerce missing inputs into zero-valued snapshots.
+
+### 14.7 Report and AI output
+
+Each customer-facing value card contains:
+
+`Customer goal -> relevant Zuper workflow -> baseline and current result ->
+change -> evidence classification -> source/coverage -> agreed next action`.
+
+The executive opening shows up to three supported outcomes, their baseline
+and date range, and progress against the customer's goals. Detail sections
+show the operational drivers and adoption that support the interpretation.
+Report unresolved goals and deteriorations as well as improvements.
+
+The AI receives only reviewed computed metrics, approved explanatory context,
+and assumption metadata. It must:
+
+- Reference a metric/evidence ID for each numeric or benefit claim.
+- Preserve numbers, units, periods, cohort rules, estimation labels, and
+  attribution limitations. Do not invent comparisons, benchmarks, or savings.
+- Describe observational changes as changes since a baseline or as associated
+  with adoption. Use causal language only when attribution evidence supports it.
+- Explain unavailable evidence and recommend a measurement action where useful.
+- Keep internal account-renewal scoring and sales pitches outside the default
+  customer-value narrative.
+
+Structured validation must verify each claim against its referenced metric,
+including units and comparison meaning. Merely checking whether a number
+appears somewhere in the input is insufficient.
+
+### 14.8 Implementation order and acceptance
+
+1. Map actual connector responses and current schema; record field coverage
+   and inaccessible sources. Obtain implementation source before coding.
+2. Add account goals/baselines and cross-module links. First deliver timely
+   billing, on-time completion, and comparable period history where supported.
+3. Add measured workflow outcomes and manual-time inputs for capacity-value
+   estimates. Enable collection/quality/productivity metrics as evidence permits.
+4. Add the benefit ledger, reviewed claim generation, and EBR/QBR/HBR layouts.
+5. Reconcile a review against one authorized account's operational evidence
+   and customer baseline before presenting account-specific value claims.
+
+Acceptance scenarios must establish that missing baselines suppress savings
+claims; old open invoices remain in as-of balances; partial/multiple billing
+and payment links do not duplicate value; retries do not inflate automation
+benefits; immature callback/quote cohorts are not compared as mature; invalid
+or unavailable timelogs do not imply full productivity coverage; negative
+changes remain visible; and AI cannot label collections or estimated capacity
+as incremental revenue or realized savings.
+
+### 14.9 Source references and limits
+
+Zuper documentation reviewed for capability context on 2026-09-23:
+
+- [Modules and capabilities](https://care.zuper.co/portal/en/kb/articles/zuper-modules-their-capabilities)
+- [Job turnaround time](https://care.zuper.co/portal/en/kb/articles/how-to-track-turnaround-time-for-a-job)
+- [Job costing and profitability](https://www.zuper.co/job-costing-and-profitability)
+- [Get Job Details](https://developers.zuper.co/reference/get-job-details)
+- [Get payments](https://developers.zuper.co/reference/get-payments)
+- [Get User Timelog Details](https://developers.zuper.co/reference/get-user-timelog-details)
+
+These establish documented capability areas and discovery leads. They do not
+verify account permissions, exact field completeness, historical retention,
+or the availability of telemetry/execution logs through a particular API.
