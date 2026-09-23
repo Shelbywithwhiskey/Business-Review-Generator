@@ -1,4 +1,5 @@
 import type JSZip from "jszip";
+import { buildChartXml, chartFrameXml, type ChartSpec } from "./nativeChart";
 
 // ---------------------------------------------------------------------------
 // Shared plumbing for slides that aren't in templates/ebr-template.pptx but are
@@ -52,6 +53,46 @@ export function run(text: string, { sz, color, bold }: { sz: number; color: stri
 export class ShapeWriter {
   private nextId = 100;
   readonly shapes: string[] = [];
+  /** Native charts; each shape entry holds a {{CHART_n}} rId placeholder resolved in insertGeneratedSlide. */
+  readonly charts: ChartSpec[] = [];
+
+  chart(x: number, y: number, cx: number, cy: number, spec: ChartSpec) {
+    const n = this.charts.push(spec) - 1;
+    this.shapes.push(chartFrameXml(this.nextId++, `{{CHART_${n}}}`, x, y, cx, cy));
+  }
+
+  /** White rounded card with an orange uppercase title; returns the inner content box. */
+  card(x: number, y: number, cx: number, cy: number, title: string) {
+    this.rect(x, y, cx, cy, COLORS.white, { radius: 5000, border: COLORS.border });
+    this.text(x + 180000, y + 140000, cx - 360000, 240000, run(title, { sz: 1100, color: COLORS.orange, bold: true }), { wrap: "none" });
+    return { x: x + 120000, y: y + 420000, cx: cx - 240000, cy: cy - 520000 };
+  }
+
+  /** Row of KPI tiles across the content width. */
+  kpis(y: number, tiles: { value: string; label: string; alert?: boolean }[], h = 820000) {
+    const gap = 130000;
+    const w = (CONTENT_W - gap * (tiles.length - 1)) / tiles.length;
+    tiles.forEach((t, i) => {
+      const x = CONTENT_X + i * (w + gap);
+      this.rect(x, y, w, h, COLORS.white, { radius: 10000, border: COLORS.border });
+      this.text(x, y + 90000, w, 400000, run(t.value, { sz: 2200, color: t.alert ? COLORS.alert : COLORS.orange, bold: true }), {
+        algn: "ctr",
+        anchor: "ctr",
+        wrap: "none",
+      });
+      this.text(x + 80000, y + 500000, w - 160000, 280000, run(t.label, { sz: 900, color: COLORS.muted }), { algn: "ctr" });
+    });
+  }
+
+  /** Centered muted message inside a box — the explicit "no data" state, never an empty chart. */
+  empty(box: { x: number; y: number; cx: number; cy: number }, message: string) {
+    this.text(box.x, box.y + box.cy / 2 - 250000, box.cx, 500000, run(message, { sz: 1050, color: COLORS.faint }), { algn: "ctr", anchor: "ctr" });
+  }
+
+  /** Small white source/definition line under the insight bar: what the data is and when it was synced. */
+  footer(text: string) {
+    this.text(CONTENT_X, 6420000, CONTENT_W, 220000, run(text, { sz: 750, color: COLORS.white }), { wrap: "none" });
+  }
 
   text(
     x: number,
@@ -116,13 +157,31 @@ async function readText(zip: JSZip, filePath: string): Promise<string> {
   return file.async("string");
 }
 
-/** Builds a slide from `shapes` on the style source's background and registers it in the deck right after `afterSlide`. */
-export async function insertGeneratedSlide(zip: JSZip, afterSlide: string, shapes: ShapeWriter): Promise<void> {
+/** Builds a slide from `shapes` on the style source's background and registers it in the deck right after
+ * `afterSlide` (a template slide path, or one returned by a previous call). Returns the new slide's path. */
+export async function insertGeneratedSlide(zip: JSZip, afterSlide: string, shapes: ShapeWriter): Promise<string> {
   const styleXml = await readText(zip, STYLE_SOURCE);
   const styleRels = await readText(zip, STYLE_SOURCE.replace("slides/", "slides/_rels/") + ".rels");
   const backgroundPic = styleXml.match(/<p:pic>[\s\S]*?<\/p:pic>/)?.[0] ?? "";
   // Same layout + background image as the style source, minus its speaker notes.
-  const slideRels = styleRels.replace(/<Relationship [^>]*relationships\/notesSlide"[^>]*\/>/g, "");
+  let slideRels = styleRels.replace(/<Relationship [^>]*relationships\/notesSlide"[^>]*\/>/g, "");
+
+  // Native chart parts: ppt/charts/chartN.xml + a slide relationship + a content-type override each.
+  let body = shapes.shapes.join("");
+  const chartOverrides: string[] = [];
+  let chartNo = 1;
+  for (const [i, spec] of shapes.charts.entries()) {
+    while (zip.file(`ppt/charts/chart${chartNo}.xml`)) chartNo += 1;
+    const chartPath = `ppt/charts/chart${chartNo}.xml`;
+    zip.file(chartPath, buildChartXml(spec));
+    const rId = `rIdChart${i + 1}`;
+    slideRels = slideRels.replace(
+      "</Relationships>",
+      `<Relationship Id="${rId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart${chartNo}.xml"/></Relationships>`
+    );
+    body = body.replace(`{{CHART_${i}}}`, rId);
+    chartOverrides.push(`<Override PartName="/${chartPath}" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>`);
+  }
 
   const slideXml =
     `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
@@ -130,7 +189,7 @@ export async function insertGeneratedSlide(zip: JSZip, afterSlide: string, shape
     `<p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>` +
     `<p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>` +
     backgroundPic +
-    shapes.shapes.join("") +
+    body +
     `</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>`;
 
   let slideNo = 1;
@@ -167,7 +226,8 @@ export async function insertGeneratedSlide(zip: JSZip, afterSlide: string, shape
     ctPath,
     contentTypes.replace(
       "</Types>",
-      `<Override PartName="/ppt/slides/${slideName}" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/></Types>`
+      `<Override PartName="/ppt/slides/${slideName}" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>${chartOverrides.join("")}</Types>`
     )
   );
+  return `ppt/slides/${slideName}`;
 }

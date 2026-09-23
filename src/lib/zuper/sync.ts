@@ -1,6 +1,11 @@
+import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
-import { ZuperClient, discoverZuperConfig } from "./client";
+import { ZuperClient, ZuperApiError, discoverZuperConfig } from "./client";
 import {
+  organizationsModule,
+  propertiesModule,
+  projectsModule,
+  fetchExecutionSnapshot,
   jobsModule,
   invoicesModule,
   quotesModule,
@@ -26,8 +31,18 @@ export const ALL_MODULES: ModuleKey[] = [
   "expenses",
   "timesheets",
   "endCustomers",
+  "organizations",
+  "properties",
+  "projects",
   "workflows",
+  "executions",
 ];
+
+/** Modules an account may simply not have (feature off / endpoint absent). Their failure is
+ * recorded on the SyncRun as a note instead of failing the whole sync. */
+const OPTIONAL_MODULES = new Set<ModuleKey>(["organizations", "properties", "projects", "executions", "timesheets", "expenses"]);
+
+const json = (v: unknown) => v as Prisma.InputJsonValue;
 
 /** Discovered data-center config for a customer, resolving and saving it on first use. Holds no secrets. */
 export async function getOrDiscoverConnection(customerId: string) {
@@ -62,18 +77,32 @@ export async function runSync(
   });
 
   const client = new ZuperClient(apiKey, credential.baseUrl);
+  const notes: string[] = [];
+
+  /** Runs an optional module; on failure records "module: reason" and carries on. */
+  async function optional(key: ModuleKey, fn: () => Promise<void>) {
+    if (!modules.includes(key)) return;
+    try {
+      await fn();
+    } catch (err) {
+      if (!OPTIONAL_MODULES.has(key)) throw err;
+      const reason = err instanceof ZuperApiError ? `HTTP ${err.status}` : err instanceof Error ? err.message : String(err);
+      notes.push(`${key} skipped (${reason})`);
+    }
+  }
 
   try {
     if (modules.includes("jobs")) {
       for await (const page of jobsModule.fetch(client)) {
         await Promise.all(
-          page.map(({ job }) =>
-            prisma.job.upsert({
+          page.map(({ job }) => {
+            const data = { ...job, statusHistory: json(job.statusHistory) };
+            return prisma.job.upsert({
               where: { customerId_zuperJobId: { customerId, zuperJobId: job.zuperJobId } },
-              create: { ...job, customerId, syncRunId: syncRun.id },
-              update: { ...job, syncRunId: syncRun.id },
-            })
-          )
+              create: { ...data, customerId, syncRunId: syncRun.id },
+              update: { ...data, syncRunId: syncRun.id },
+            });
+          })
         );
         // Line items have no stable uid in the list payload, so each job's set is replaced wholesale.
         await prisma.$transaction([
@@ -181,7 +210,7 @@ export async function runSync(
       }
     }
 
-    if (modules.includes("expenses")) {
+    await optional("expenses", async () => {
       for await (const page of expensesModule.fetch(client)) {
         await Promise.all(
           page.map((expense) =>
@@ -193,9 +222,9 @@ export async function runSync(
           )
         );
       }
-    }
+    });
 
-    if (modules.includes("timesheets")) {
+    await optional("timesheets", async () => {
       for await (const page of timesheetsModule.fetch(client, range)) {
         await Promise.all(
           page.map((event) =>
@@ -207,7 +236,7 @@ export async function runSync(
           )
         );
       }
-    }
+    });
 
     if (modules.includes("endCustomers")) {
       for await (const page of endCustomersModule.fetch(client)) {
@@ -222,6 +251,48 @@ export async function runSync(
         );
       }
     }
+
+    await optional("organizations", async () => {
+      for await (const page of organizationsModule.fetch(client)) {
+        await Promise.all(
+          page.map((org) =>
+            prisma.organization.upsert({
+              where: { customerId_zuperOrganizationId: { customerId, zuperOrganizationId: org.zuperOrganizationId } },
+              create: { ...org, customerId, syncRunId: syncRun.id },
+              update: { ...org, syncRunId: syncRun.id },
+            })
+          )
+        );
+      }
+    });
+
+    await optional("properties", async () => {
+      for await (const page of propertiesModule.fetch(client)) {
+        await Promise.all(
+          page.map((property) =>
+            prisma.property.upsert({
+              where: { customerId_zuperPropertyId: { customerId, zuperPropertyId: property.zuperPropertyId } },
+              create: { ...property, customerId, syncRunId: syncRun.id },
+              update: { ...property, syncRunId: syncRun.id },
+            })
+          )
+        );
+      }
+    });
+
+    await optional("projects", async () => {
+      for await (const page of projectsModule.fetch(client)) {
+        await Promise.all(
+          page.map((project) =>
+            prisma.project.upsert({
+              where: { customerId_zuperProjectId: { customerId, zuperProjectId: project.zuperProjectId } },
+              create: { ...project, customerId, syncRunId: syncRun.id },
+              update: { ...project, syncRunId: syncRun.id },
+            })
+          )
+        );
+      }
+    });
 
     // Workflow Builder lives on a separate host — skip quietly if it was never
     // discovered (older credential, or the account has no Workflow Builder access).
@@ -242,6 +313,31 @@ export async function runSync(
       await prisma.workflow.deleteMany({ where: { customerId, syncRunId: { not: syncRun.id } } });
     }
 
+    const workflowBaseUrl = credential.workflowBaseUrl;
+    if (workflowBaseUrl) {
+      await optional("executions", async () => {
+        const workflowClient = new ZuperClient(apiKey, workflowBaseUrl);
+        const workflows = await prisma.workflow.findMany({ where: { customerId }, select: { zuperWorkflowId: true, name: true } });
+        const snap = await fetchExecutionSnapshot(
+          workflowClient,
+          workflows.map((w) => ({ workflowUid: w.zuperWorkflowId, name: w.name })),
+          range
+        );
+        const data = {
+          ...snap,
+          perWorkflow: json(snap.perWorkflow),
+          weekly: json(snap.weekly),
+          topErrors: json(snap.topErrors),
+          syncRunId: syncRun.id,
+        };
+        await prisma.workflowExecutionSnapshot.upsert({
+          where: { customerId_periodStart_periodEnd: { customerId, periodStart: range.start, periodEnd: range.end } },
+          create: { ...data, customerId, periodStart: range.start, periodEnd: range.end },
+          update: data,
+        });
+      });
+    }
+
     // Rollups derived from raw synced rows, not from the Zuper API directly.
     if (modules.includes("jobs") && modules.includes("teams")) {
       await computeTechnicianRollups(customerId, range);
@@ -257,7 +353,8 @@ export async function runSync(
 
     await prisma.syncRun.update({
       where: { id: syncRun.id },
-      data: { status: "SUCCESS", completedAt: new Date() },
+      // Notes (skipped optional modules) surface as "Last sync: SUCCESS — …" on the customer page.
+      data: { status: "SUCCESS", completedAt: new Date(), errorMessage: notes.length ? notes.join("; ") : null },
     });
   } catch (err) {
     await prisma.syncRun.update({

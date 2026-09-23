@@ -74,7 +74,7 @@ export function usageInsight(usage: LineItemUsage): string {
   );
 }
 
-export async function insertUsageSlide(zip: JSZip, usage: LineItemUsage, periodLabel: string): Promise<void> {
+export async function insertUsageSlide(zip: JSZip, usage: LineItemUsage, periodLabel: string): Promise<string> {
   const w = new ShapeWriter();
   w.header(
     "Parts, Products & Services Usage",
@@ -85,5 +85,6 @@ export async function insertUsageSlide(zip: JSZip, usage: LineItemUsage, periodL
   drawCard(w, CARD_XS[1], "PRODUCTS", "products", usage.products);
   drawCard(w, CARD_XS[2], "SERVICES", "services", usage.services);
   w.insight(usageInsight(usage));
-  await insertGeneratedSlide(zip, INSERT_AFTER, w);
+  w.footer("Source: Zuper Jobs — parts, products & services added to jobs created in the period · ranked by number of jobs using each item");
+  return insertGeneratedSlide(zip, INSERT_AFTER, w);
 }

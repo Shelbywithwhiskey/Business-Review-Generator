@@ -119,7 +119,7 @@ export function automationInsight(s: WorkflowSummary): string {
   return `${parts.join("; ")}.`;
 }
 
-export async function insertAutomationSlide(zip: JSZip, s: WorkflowSummary, customerName: string, periodLabel: string): Promise<void> {
+export async function insertAutomationSlide(zip: JSZip, s: WorkflowSummary, customerName: string, periodLabel: string): Promise<string> {
   const w = new ShapeWriter();
   w.header(`How ${customerName} Automates Manual Work`, `${periodLabel}  ·  Workflow Builder automations`);
   drawKpis(w, s);
@@ -133,5 +133,6 @@ export async function insertAutomationSlide(zip: JSZip, s: WorkflowSummary, cust
   drawBarCard(w, CARD_XS[1], "WHAT GETS AUTOMATED", workRows(s), "No live workflows");
   drawWorkflowList(w, CARD_XS[2], s);
   w.insight(automationInsight(s));
-  await insertGeneratedSlide(zip, INSERT_AFTER, w);
+  w.footer('Source: Zuper Workflow Builder definitions (current configuration) · "ran this period" = most recent run falls in the period · run counts on the next slide');
+  return insertGeneratedSlide(zip, INSERT_AFTER, w);
 }

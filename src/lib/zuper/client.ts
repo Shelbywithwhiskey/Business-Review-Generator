@@ -147,6 +147,11 @@ export class ZuperClient {
     }
   }
 
+  /** Whole response envelope, e.g. when total_records is the value you want. */
+  async getRaw<T>(path: string, params: Record<string, string | number | undefined> = {}): Promise<T> {
+    return this.request<T>(path, params);
+  }
+
   /** For endpoints that return a single {data: {...}} object, e.g. GET /team. */
   async get<T>(path: string, params: Record<string, string | number | undefined> = {}): Promise<T> {
     const res = await this.request<{ data: T }>(path, params);

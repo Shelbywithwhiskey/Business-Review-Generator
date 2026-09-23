@@ -12,7 +12,22 @@ const schema = z.object({
   periodEnd: z.string(),
   modules: z
     .array(
-      z.enum(["jobs", "invoices", "quotes", "teams", "payments", "products", "expenses", "timesheets", "endCustomers", "workflows"])
+      z.enum([
+        "jobs",
+        "invoices",
+        "quotes",
+        "teams",
+        "payments",
+        "products",
+        "expenses",
+        "timesheets",
+        "endCustomers",
+        "organizations",
+        "properties",
+        "projects",
+        "workflows",
+        "executions",
+      ])
     )
     .optional(),
 });

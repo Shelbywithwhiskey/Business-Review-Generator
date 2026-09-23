@@ -19,6 +19,44 @@ export interface NormalizedJob {
   createdAt: Date;
   completedAt: Date | null;
   scheduledAt: Date | null;
+  priority: string | null;
+  isRecurring: boolean;
+  isScheduled: boolean;
+  currentStatusType: string | null;
+  organizationUid: string | null;
+  statusHistory: JobStatusEntry[];
+}
+
+export interface JobStatusEntry {
+  type: string;
+  name: string;
+  at: string;
+  minutes: number | null;
+}
+
+export interface NormalizedOrganization {
+  zuperOrganizationId: string;
+  name: string;
+  isActive: boolean;
+  noOfCustomers: number;
+  createdAt: Date;
+}
+
+export interface NormalizedProperty {
+  zuperPropertyId: string;
+  name: string;
+  organizationUid: string | null;
+  state: string | null;
+  noOfJobs: number;
+  isActive: boolean;
+  createdAt: Date;
+}
+
+export interface NormalizedProject {
+  zuperProjectId: string;
+  name: string;
+  status: string | null;
+  createdAt: Date;
 }
 
 export interface NormalizedJobLineItem {
@@ -125,6 +163,9 @@ export interface NormalizedEndCustomer {
   receivables: number;
   credits: number;
   tags: string[];
+  category: string | null;
+  organizationUid: string | null;
+  createdInZuperAt: Date | null;
 }
 
 export interface NormalizedWorkflow {
@@ -186,8 +227,9 @@ function normalizeJobLineItems(raw: Record<string, any>): NormalizedJobLineItem[
 
 function normalizeJob(raw: Record<string, any>): NormalizedJob {
   const statusType = String(raw.current_job_status?.status_type ?? "").toUpperCase();
+  // CLOSED is Zuper's post-completion state (verified 2026-09-23: NEW > SCHEDULED > COMPLETED > CLOSED) — done, not open.
   const status =
-    statusType === "COMPLETED"
+    statusType === "COMPLETED" || statusType === "CLOSED"
       ? "completed"
       : statusType === "CANCELLED" || statusType === "DECLINED"
         ? "cancelled"
@@ -214,8 +256,72 @@ function normalizeJob(raw: Record<string, any>): NormalizedJob {
     createdAt: new Date(raw.created_at),
     completedAt: completedHistoryEntry ? new Date(completedHistoryEntry.created_at) : null,
     scheduledAt: raw.due_date ? new Date(raw.due_date) : null,
+    priority: raw.job_priority ?? null,
+    isRecurring: Boolean(raw.is_recurrence),
+    isScheduled: Boolean(raw.is_scheduled),
+    currentStatusType: statusType || null,
+    organizationUid: raw.organization?.organization_uid ?? null,
+    statusHistory: ((raw.job_status as Record<string, any>[] | undefined) ?? []).map((s) => ({
+      type: String(s.status_type ?? "UNKNOWN").toUpperCase(),
+      name: s.status_name ?? "Unknown",
+      at: s.created_at,
+      minutes: typeof s.time_on_status === "number" ? s.time_on_status : null,
+    })),
   };
 }
+
+export const organizationsModule = {
+  key: "organizations" as const,
+  async *fetch(client: ZuperClient) {
+    for await (const page of client.paginate<Record<string, any>>("organization")) {
+      yield page.map(
+        (raw): NormalizedOrganization => ({
+          zuperOrganizationId: String(raw.organization_uid),
+          name: raw.organization_name ?? "Unnamed organization",
+          isActive: raw.is_active !== false,
+          noOfCustomers: Number(raw.no_of_customers ?? 0),
+          createdAt: new Date(raw.created_at),
+        })
+      );
+    }
+  },
+};
+
+export const propertiesModule = {
+  key: "properties" as const,
+  async *fetch(client: ZuperClient) {
+    for await (const page of client.paginate<Record<string, any>>("property")) {
+      yield page.map(
+        (raw): NormalizedProperty => ({
+          zuperPropertyId: String(raw.property_uid),
+          name: raw.property_name ?? "Unnamed property",
+          organizationUid: raw.property_organization?.organization_uid ?? null,
+          state: raw.property_address?.state || null,
+          noOfJobs: Number(raw.no_of_jobs ?? 0),
+          isActive: raw.is_active !== false,
+          createdAt: new Date(raw.created_at),
+        })
+      );
+    }
+  },
+};
+
+/** UNVERIFIED shape: every account probed had zero projects (see prisma Project comment). */
+export const projectsModule = {
+  key: "projects" as const,
+  async *fetch(client: ZuperClient) {
+    for await (const page of client.paginate<Record<string, any>>("projects")) {
+      yield page.map(
+        (raw): NormalizedProject => ({
+          zuperProjectId: String(raw.project_uid ?? raw.id),
+          name: raw.project_name ?? raw.project_title ?? raw.name ?? "Unnamed project",
+          status: raw.current_project_status?.status_name ?? raw.project_status?.status_name ?? raw.project_status ?? raw.status ?? null,
+          createdAt: new Date(raw.created_at),
+        })
+      );
+    }
+  },
+};
 
 export const invoicesModule = {
   key: "invoices" as const,
@@ -432,6 +538,9 @@ function normalizeEndCustomer(raw: Record<string, any>): NormalizedEndCustomer {
     receivables: Number(raw.accounts?.receivables ?? 0),
     credits: Number(raw.accounts?.credits ?? 0),
     tags: Array.isArray(raw.customer_tags) ? raw.customer_tags.map(String) : [],
+    category: raw.customer_category?.category_name ?? null,
+    organizationUid: raw.customer_organization?.organization_uid ?? null,
+    createdInZuperAt: raw.created_at ? new Date(raw.created_at) : null,
   };
 }
 
@@ -477,6 +586,105 @@ function normalizeWorkflow(raw: Record<string, any>, detail: Record<string, any>
   };
 }
 
+// ---- Workflow executions (aggregated, not stored per-run) ----
+// GET /workflows/execution_history is what Workflow Builder's own Executions
+// screen calls. Verified 2026-09-23 against a live account: accepts the API key;
+// filter.workflow_uid / filter.status (COMPLETED | FAILED | SKIPPED) /
+// filter.start_date + filter.end_date (YYYY-MM-DD, inclusive) narrow
+// total_records exactly; limit goes up to 1000; filter.mode is ignored;
+// history only reaches back ~2 months. So counts come from total_records
+// (one cheap call per filter) rather than paging through every run.
+
+export interface ExecutionSnapshot {
+  retainedFrom: Date | null;
+  countedFrom: Date;
+  completed: number;
+  failed: number;
+  skipped: number;
+  medianMs: number | null;
+  p90Ms: number | null;
+  perWorkflow: { workflowUid: string; name: string; completed: number; failed: number; skipped: number; medianMs: number | null }[];
+  weekly: { weekStart: string; total: number; failed: number }[];
+  topErrors: { message: string; count: number }[];
+  errorSampleSize: number;
+}
+
+const EXEC_STATUSES = ["COMPLETED", "FAILED", "SKIPPED"] as const;
+
+function ymd(d: Date): string {
+  return d.toISOString().slice(0, 10);
+}
+
+function percentile(sorted: number[], p: number): number | null {
+  return sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))] : null;
+}
+
+export async function fetchExecutionSnapshot(
+  client: ZuperClient,
+  workflows: { workflowUid: string; name: string }[],
+  range: DateRange
+): Promise<ExecutionSnapshot> {
+  type Envelope = { data?: Record<string, any>[]; total_records?: number };
+  const history = (params: Record<string, string | number | undefined>) =>
+    client.getRaw<Envelope>("workflows/execution_history", { page: 1, limit: 1, ...params });
+  const count = async (params: Record<string, string | number | undefined>) => (await history(params)).total_records ?? 0;
+
+  // Oldest retained execution = last record of the unfiltered, newest-first list.
+  const all = await history({});
+  const total = all.total_records ?? 0;
+  const oldest = total ? (await history({ page: total })).data?.[0]?.created_at : null;
+  const retainedFrom = oldest ? new Date(oldest) : null;
+  const countedFrom = retainedFrom && retainedFrom > range.start ? retainedFrom : range.start;
+  const window = { "filter.start_date": ymd(countedFrom), "filter.end_date": ymd(range.end) };
+
+  const perWorkflow = [];
+  for (const wf of workflows) {
+    const [completed, failed, skipped] = await Promise.all(
+      EXEC_STATUSES.map((status) => count({ ...window, "filter.workflow_uid": wf.workflowUid, "filter.status": status }))
+    );
+    let medianMs: number | null = null;
+    if (completed > 0) {
+      const sample = await history({ ...window, "filter.workflow_uid": wf.workflowUid, "filter.status": "COMPLETED", limit: 200 });
+      const ms = (sample.data ?? []).map((e) => Number(e.execution_time_ms)).filter(Number.isFinite).sort((a, b) => a - b);
+      medianMs = percentile(ms, 0.5);
+    }
+    perWorkflow.push({ ...wf, completed, failed, skipped, medianMs });
+  }
+
+  const [completed, failed, skipped] = await Promise.all(EXEC_STATUSES.map((status) => count({ ...window, "filter.status": status })));
+
+  const weekly: ExecutionSnapshot["weekly"] = [];
+  for (let start = new Date(countedFrom); start <= range.end; start = new Date(start.getTime() + 7 * 864e5)) {
+    const end = new Date(Math.min(start.getTime() + 6 * 864e5, range.end.getTime()));
+    const w = { "filter.start_date": ymd(start), "filter.end_date": ymd(end) };
+    const [wTotal, wFailed] = await Promise.all([count(w), count({ ...w, "filter.status": "FAILED" })]);
+    weekly.push({ weekStart: ymd(start), total: wTotal, failed: wFailed });
+  }
+
+  const failedSample = failed ? (await history({ ...window, "filter.status": "FAILED", limit: 1000 })).data ?? [] : [];
+  const errorCounts = new Map<string, number>();
+  for (const e of failedSample) {
+    const message = String(e.error_message || e.error_code || "Unknown error").slice(0, 80);
+    errorCounts.set(message, (errorCounts.get(message) ?? 0) + 1);
+  }
+  const okSample = completed ? (await history({ ...window, "filter.status": "COMPLETED", limit: 1000 })).data ?? [] : [];
+  const ms = okSample.map((e) => Number(e.execution_time_ms)).filter(Number.isFinite).sort((a, b) => a - b);
+
+  return {
+    retainedFrom,
+    countedFrom,
+    completed,
+    failed,
+    skipped,
+    medianMs: percentile(ms, 0.5),
+    p90Ms: percentile(ms, 0.9),
+    perWorkflow,
+    weekly,
+    topErrors: [...errorCounts.entries()].map(([message, n]) => ({ message, count: n })).sort((a, b) => b.count - a.count).slice(0, 5),
+    errorSampleSize: failedSample.length,
+  };
+}
+
 export const MODULE_REGISTRY = [
   jobsModule,
   invoicesModule,
@@ -488,4 +696,10 @@ export const MODULE_REGISTRY = [
   timesheetsModule,
   endCustomersModule,
 ];
-export type ModuleKey = (typeof MODULE_REGISTRY)[number]["key"] | "workflows";
+export type ModuleKey =
+  | (typeof MODULE_REGISTRY)[number]["key"]
+  | "workflows"
+  | "organizations"
+  | "properties"
+  | "projects"
+  | "executions";

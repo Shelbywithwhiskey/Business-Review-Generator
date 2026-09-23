@@ -6,6 +6,7 @@ import { buildEbrTokenData } from "./ebrTokens";
 import { injectLineChartData } from "./chartData";
 import { insertUsageSlide } from "./usageSlide";
 import { insertAutomationSlide } from "./automationSlide";
+import { insertModuleSlides } from "./moduleSlides";
 
 const TEMPLATE_PATH = path.join(process.cwd(), "templates", "ebr-template.pptx");
 
@@ -68,8 +69,10 @@ export async function generateEbrPptx(options: GenerateEbrPptxOptions): Promise<
     }
   }
 
+  // Generated (non-template) slides. Template charts are chart1–6; generated charts take the next free numbers.
   await insertUsageSlide(zip, usage, periodLabel);
-  await insertAutomationSlide(zip, workflowSummary, customerName, periodLabel);
+  const automationSlidePath = await insertAutomationSlide(zip, workflowSummary, customerName, periodLabel);
+  await insertModuleSlides(zip, { customerId, customerName, range, usage, workflowSummary, automationSlidePath });
 
   const buffer = await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
   return buffer;

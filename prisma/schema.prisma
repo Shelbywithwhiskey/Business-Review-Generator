@@ -34,7 +34,11 @@ model Customer {
   expenses          Expense[]
   timesheetEvents   TimesheetEvent[]
   endCustomers      EndCustomerLedger[]
+  organizations     Organization[]
+  properties        Property[]
+  projects          Project[]
   workflows         Workflow[]
+  executionSnapshots WorkflowExecutionSnapshot[]
   metricSnapshots   MetricSnapshot[]
   healthScores      HealthScore[]
   opportunities     OpportunitySignal[]
@@ -126,10 +130,96 @@ model Job {
   createdAt      DateTime
   completedAt    DateTime?
   scheduledAt    DateTime?
+  priority       String? // LOW | MEDIUM | HIGH | URGENT
+  isRecurring    Boolean   @default(false)
+  isScheduled    Boolean   @default(false)
+  currentStatusType String? // NEW | SCHEDULED | STARTED | COMPLETED | CLOSED | FOLLOW_UP | OTHER ...
+  organizationUid String? // B2B accounts attach jobs to an organization rather than (or as well as) a customer
+  // job_status[] history: [{ type, name, at (ISO), minutes }] — minutes = Zuper's time_on_status,
+  // verified 2026-09-23 to equal the gap to the next status entry, in minutes.
+  statusHistory  Json?
   syncRunId      String
 
   @@unique([customerId, zuperJobId])
   @@index([customerId, createdAt])
+}
+
+// Tenant's B2B organizations (GET /organization).
+model Organization {
+  id                  String   @id @default(cuid())
+  customerId          String
+  customer            Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  zuperOrganizationId String
+  name                String
+  isActive            Boolean  @default(true)
+  noOfCustomers       Int      @default(0)
+  createdAt           DateTime
+  syncRunId           String
+
+  @@unique([customerId, zuperOrganizationId])
+}
+
+// Service locations (GET /property). noOfJobs is Zuper's own all-time count.
+model Property {
+  id              String   @id @default(cuid())
+  customerId      String
+  customer        Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  zuperPropertyId String
+  name            String
+  organizationUid String?
+  state           String?
+  noOfJobs        Int      @default(0)
+  isActive        Boolean  @default(true)
+  createdAt       DateTime
+  syncRunId       String
+
+  @@unique([customerId, zuperPropertyId])
+}
+
+// GET /projects. Field mapping is best-effort — every account probed so far had
+// zero projects, so a populated item's shape is unverified (same caveat as Expense).
+model Project {
+  id             String   @id @default(cuid())
+  customerId     String
+  customer       Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  zuperProjectId String
+  name           String
+  status         String?
+  createdAt      DateTime
+  syncRunId      String
+
+  @@unique([customerId, zuperProjectId])
+}
+
+// Aggregated Workflow Builder execution counts for one sync period, from the
+// (undocumented) GET /workflows/execution_history endpoint that Workflow
+// Builder's own Executions screen uses — verified 2026-09-23 to accept the API
+// key and to return exact total_records per workflow/status/date filter.
+// Zuper retains ~2 months of history, so retainedFrom is stored and shown.
+model WorkflowExecutionSnapshot {
+  id            String    @id @default(cuid())
+  customerId    String
+  customer      Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  periodStart   DateTime
+  periodEnd     DateTime
+  retainedFrom  DateTime? // oldest execution Zuper still holds
+  countedFrom   DateTime // max(periodStart, retainedFrom) — what the counts actually cover
+  completed     Int       @default(0)
+  failed        Int       @default(0)
+  skipped       Int       @default(0)
+  medianMs      Float?
+  p90Ms         Float?
+  // [{ workflowUid, name, completed, failed, skipped, medianMs }]
+  perWorkflow   Json
+  // [{ weekStart (ISO date), total, failed }]
+  weekly        Json
+  // [{ message, count }] from a sample of FAILED executions (see sampleSize)
+  topErrors     Json
+  errorSampleSize Int     @default(0)
+  syncRunId     String
+  createdAt     DateTime  @default(now())
+
+  @@unique([customerId, periodStart, periodEnd])
 }
 
 // Parts/products/services actually added to a job — the job's own `products`
@@ -314,6 +404,9 @@ model EndCustomerLedger {
   receivables     Decimal  @default(0) @db.Decimal(12, 2)
   credits         Decimal  @default(0) @db.Decimal(12, 2)
   tags            String[]
+  category        String? // customer_category.category_name, e.g. "Retail"
+  organizationUid String?
+  createdInZuperAt DateTime? // when the end customer was created in Zuper — "new customers this period"
   syncRunId       String
 
   @@unique([customerId, zuperCustomerId])
