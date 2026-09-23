@@ -25,6 +25,7 @@ model Customer {
   credential        ApiCredential?
   syncRuns          SyncRun[]
   jobs              Job[]
+  jobLineItems      JobLineItem[]
   invoices          Invoice[]
   technicians       Technician[]
   payments          Payment[]
@@ -40,11 +41,12 @@ model Customer {
   reports           Report[]
 }
 
+// Discovered connection config only — the Zuper API key itself is NEVER stored.
+// It's entered by hand for each sync and lives only in that request's memory.
 model ApiCredential {
   id               String    @id @default(cuid())
   customerId       String    @unique
   customer         Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
-  encryptedApiKey  String // AES-256-GCM ciphertext, base64 ("iv:tag:ciphertext")
   baseUrl          String    @default("https://api.zuperpro.com")
   // Workflow Builder lives on a separate host (dc_workflow_builder_url from the
   // accounts.zuperpro.com/api/config discovery response) — not derivable from baseUrl.
@@ -54,20 +56,31 @@ model ApiCredential {
   updatedAt        DateTime  @updatedAt
 }
 
-// Workflow Builder definitions. The API only exposes definitions (name, active
-// status, last_execution_time) — no run counts or success rates, confirmed by
-// testing /workflows/{uid}/runs, /executions, /history (all 404) against a real
-// account with 5 workflows.
+// Workflow Builder definitions. The API only exposes definitions plus the most
+// recent run (last_execution_time/status) — no run counts, execution history or
+// success rates. Re-confirmed 2026-09-23 across 3 accounts / 31 workflows: every
+// runs/executions/history/logs/stats/analytics/usage path 404s, on both the
+// Workflow Builder host and the main API. Trigger/step fields come from
+// GET /workflows/{uid} (the published "live_nodes", else draft "nodes").
 model Workflow {
-  id                 String    @id @default(cuid())
-  customerId         String
-  customer           Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  id                  String    @id @default(cuid())
+  customerId          String
+  customer            Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
   zuperWorkflowId     String
-  name               String
-  description        String?
-  isActive           Boolean   @default(true)
-  isAiGenerated      Boolean   @default(false)
-  lastExecutionTime  DateTime?
+  name                String
+  description         String?
+  isActive            Boolean   @default(true)
+  isAiGenerated       Boolean   @default(false)
+  isPublished         Boolean   @default(false) // has a live_version; drafts never run
+  lastPublishedAt     DateTime?
+  needsAttention      Boolean   @default(false)
+  triggerName         String? // e.g. "On Job Status Update", "On Webhook"
+  triggerKey          String? // e.g. "job.status_update", "external_webhook"
+  triggerModule       String? // JOB | PROJECT | null (webhook)
+  stepCount           Int       @default(0) // ACTION nodes, excluding the trigger
+  actionKeys          String[] // one entry per ACTION node, e.g. zuper_email, http_request
+  lastExecutionStatus String? // COMPLETED | ... — the most recent run only
+  lastExecutionTime   DateTime?
   createdAt          DateTime
   updatedAt          DateTime
   syncRunId          String
@@ -117,6 +130,32 @@ model Job {
 
   @@unique([customerId, zuperJobId])
   @@index([customerId, createdAt])
+}
+
+// Parts/products/services actually added to a job — the job's own `products`
+// array, which GET /jobs already returns inline (verified identical to
+// GET /jobs/{uid} across 60 jobs, 2026-09-23). Unlike Product (the catalog),
+// this is usage. Replaced wholesale per job on every sync; the list payload
+// has no stable line-item uid, so rows are keyed by position within the job.
+model JobLineItem {
+  id            String   @id @default(cuid())
+  customerId    String
+  customer      Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  zuperJobId    String
+  position      Int
+  productUid    String?
+  name          String
+  productType   String // PARTS | PRODUCT | SERVICE, as Zuper sends it (uppercased)
+  category      String?
+  quantity      Decimal  @default(0) @db.Decimal(12, 2)
+  unitPrice     Decimal  @default(0) @db.Decimal(12, 2)
+  total         Decimal  @default(0) @db.Decimal(12, 2)
+  purchasePrice Decimal  @default(0) @db.Decimal(12, 2)
+  jobCreatedAt  DateTime // denormalized from Job.createdAt so period filtering needs no join
+  syncRunId     String
+
+  @@unique([customerId, zuperJobId, position])
+  @@index([customerId, jobCreatedAt])
 }
 
 model Invoice {

@@ -27,10 +27,75 @@ const SECTION_TITLES: Record<string, string> = {
   jobs_performance: "Jobs Performance",
   invoice_performance: "Invoice Performance",
   quotes_performance: "Quotes & Proposals",
+  parts_usage: "Parts, Products & Services Usage",
   technician_performance: "Technician Performance",
   key_insights: "Key Insights",
   opportunities: "Opportunities",
 };
+
+interface UsageEntry {
+  name: string;
+  jobCount: number;
+  quantity: number;
+  revenue: number;
+}
+
+interface UsageType {
+  jobCount: number;
+  distinctItems: number;
+  totalRevenue: number;
+  top: UsageEntry[];
+}
+
+interface LineItemUsage {
+  parts: UsageType;
+  products: UsageType;
+  services: UsageType;
+}
+
+const money = (n: number) => `$${Math.round(n).toLocaleString("en-US")}`;
+
+function UsageTables({ usage }: { usage: LineItemUsage }) {
+  const groups: [string, UsageType][] = [
+    ["Parts", usage.parts],
+    ["Products", usage.products],
+    ["Services", usage.services],
+  ];
+  return (
+    <div className="mt-3 grid gap-4 sm:grid-cols-3">
+      {groups.map(([label, group]) => {
+        const maxJobs = Math.max(...group.top.map((t) => t.jobCount), 1);
+        return (
+          <div key={label} className="rounded-md border border-neutral-200 p-3 text-sm dark:border-neutral-800">
+            <p className="font-medium">{label}</p>
+            <p className="text-xs text-neutral-500">
+              {money(group.totalRevenue)} · {group.distinctItems} items · {group.jobCount} jobs
+            </p>
+            {group.top.length === 0 ? (
+              <p className="mt-2 text-xs text-neutral-500">None recorded this period</p>
+            ) : (
+              <ol className="mt-2 space-y-2">
+                {group.top.map((item) => (
+                  <li key={item.name}>
+                    <div className="flex justify-between gap-2">
+                      <span className="truncate">{item.name}</span>
+                      <span className="shrink-0 text-xs text-neutral-500">
+                        {item.jobCount} jobs · {money(item.revenue)}
+                      </span>
+                    </div>
+                    <div className="mt-1 h-1.5 rounded bg-neutral-100 dark:bg-neutral-800">
+                      <div className="h-1.5 rounded bg-orange-600" style={{ width: `${(item.jobCount / maxJobs) * 100}%` }} />
+                    </div>
+                  </li>
+                ))}
+              </ol>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
 export default function ReportPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = usePromise(params);
@@ -113,6 +178,7 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
                 rows={4}
                 className="w-full resize-y rounded-md border border-transparent bg-transparent px-1 py-1 leading-relaxed hover:border-neutral-200 focus:border-neutral-300 focus:outline-none dark:hover:border-neutral-800 dark:focus:border-neutral-700"
               />
+              {section.sectionKey === "parts_usage" && <UsageTables usage={section.contentJson as LineItemUsage} />}
               {section.recommendationText != null && (
                 <div className="mt-2 rounded-md bg-neutral-100 p-3 text-sm dark:bg-neutral-900">
                   <span className="font-medium">Recommendation: </span>

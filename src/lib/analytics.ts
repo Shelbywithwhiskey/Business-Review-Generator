@@ -393,6 +393,123 @@ export async function computeExpenseMetrics(customerId: string, range: DateRange
   return { total: expenses.length, totalAmount, billableAmount };
 }
 
+export interface LineItemUsageEntry {
+  name: string;
+  category: string | null;
+  /** Number of distinct jobs this item was added to — the ranking key ("most used"). */
+  jobCount: number;
+  quantity: number;
+  revenue: number;
+  /** Share of this type's line-item revenue. */
+  revenueShare: number;
+}
+
+export interface LineItemTypeUsage {
+  jobCount: number;
+  distinctItems: number;
+  totalQuantity: number;
+  totalRevenue: number;
+  top: LineItemUsageEntry[];
+}
+
+export interface LineItemUsage {
+  jobsTotal: number;
+  jobsWithLineItems: number;
+  /** Share of the period's jobs that had at least one part/product/service on them. */
+  attachRate: number;
+  totalRevenue: number;
+  parts: LineItemTypeUsage;
+  products: LineItemTypeUsage;
+  services: LineItemTypeUsage;
+}
+
+type UsageBucket = "parts" | "products" | "services";
+
+function usageBucket(productType: string): UsageBucket | null {
+  if (productType.startsWith("PART")) return "parts";
+  if (productType === "PRODUCT") return "products";
+  if (productType === "SERVICE") return "services";
+  return null;
+}
+
+export interface LineItemRow {
+  zuperJobId: string;
+  productUid: string | null;
+  name: string;
+  productType: string;
+  category: string | null;
+  quantity: number | { toString(): string };
+  total: number | { toString(): string };
+}
+
+/** Parts, products and services used on jobs created in the period, ranked by how many jobs used each item. */
+export async function computeLineItemUsage(customerId: string, range: DateRange, topN = 5): Promise<LineItemUsage> {
+  const [items, jobsTotal] = await Promise.all([
+    prisma.jobLineItem.findMany({
+      where: { customerId, jobCreatedAt: { gte: range.start, lte: range.end } },
+      select: { zuperJobId: true, productUid: true, name: true, productType: true, category: true, quantity: true, total: true },
+    }),
+    prisma.job.count({ where: { customerId, createdAt: { gte: range.start, lte: range.end } } }),
+  ]);
+  return summarizeLineItemUsage(items, jobsTotal, topN);
+}
+
+export function summarizeLineItemUsage(items: LineItemRow[], jobsTotal: number, topN = 5): LineItemUsage {
+  type Agg = { name: string; category: string | null; jobs: Set<string>; quantity: number; revenue: number };
+  const groups: Record<UsageBucket, Map<string, Agg>> = { parts: new Map(), products: new Map(), services: new Map() };
+  const jobsByBucket: Record<UsageBucket, Set<string>> = { parts: new Set(), products: new Set(), services: new Set() };
+  const jobsWithLineItems = new Set<string>();
+  let totalRevenue = 0;
+
+  for (const item of items) {
+    const revenue = Number(item.total);
+    jobsWithLineItems.add(item.zuperJobId);
+    totalRevenue += revenue;
+
+    const bucket = usageBucket(item.productType);
+    if (!bucket) continue;
+    jobsByBucket[bucket].add(item.zuperJobId);
+    const key = item.productUid ?? item.name;
+    const agg = groups[bucket].get(key) ?? { name: item.name, category: item.category, jobs: new Set(), quantity: 0, revenue: 0 };
+    agg.jobs.add(item.zuperJobId);
+    agg.quantity += Number(item.quantity);
+    agg.revenue += revenue;
+    groups[bucket].set(key, agg);
+  }
+
+  const summarize = (bucket: UsageBucket): LineItemTypeUsage => {
+    const all = [...groups[bucket].values()];
+    const bucketRevenue = all.reduce((sum, a) => sum + a.revenue, 0);
+    return {
+      jobCount: jobsByBucket[bucket].size,
+      distinctItems: all.length,
+      totalQuantity: all.reduce((sum, a) => sum + a.quantity, 0),
+      totalRevenue: bucketRevenue,
+      top: all
+        .sort((a, b) => b.jobs.size - a.jobs.size || b.revenue - a.revenue)
+        .slice(0, topN)
+        .map((a) => ({
+          name: a.name,
+          category: a.category,
+          jobCount: a.jobs.size,
+          quantity: a.quantity,
+          revenue: a.revenue,
+          revenueShare: bucketRevenue ? a.revenue / bucketRevenue : 0,
+        })),
+    };
+  };
+
+  return {
+    jobsTotal,
+    jobsWithLineItems: jobsWithLineItems.size,
+    attachRate: jobsTotal ? jobsWithLineItems.size / jobsTotal : 0,
+    totalRevenue,
+    parts: summarize("parts"),
+    products: summarize("products"),
+    services: summarize("services"),
+  };
+}
+
 /** Zuper's own end-customer ledger (LTV/receivables/credits) — a current snapshot, not period-scoped. */
 export async function computeLedgerMetrics(customerId: string): Promise<LedgerMetrics> {
   const endCustomers = await prisma.endCustomerLedger.findMany({ where: { customerId } });

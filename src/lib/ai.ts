@@ -9,7 +9,9 @@ import type {
   QuoteMetrics,
   TechnicianRanking,
   KeyInsights,
+  LineItemUsage,
 } from "@/lib/analytics";
+import { usageInsight } from "@/lib/pptx/usageSlide";
 import type { RecommendationSignal } from "@/lib/reports/ebrMetrics";
 import type { WebsiteContext } from "@/lib/website";
 import { ZUPER_PRODUCT_KNOWLEDGE } from "@/lib/zuperProductKnowledge";
@@ -215,6 +217,8 @@ export async function generateSectionNarrative(sectionKey: string, sectionMetric
         return templateInvoiceNarrative(sectionMetrics as InvoiceMetrics);
       case "quotes_performance":
         return templateQuoteNarrative(sectionMetrics as QuoteMetrics);
+      case "parts_usage":
+        return usageInsight(sectionMetrics as LineItemUsage);
       case "technician_performance":
         return templateTechnicianNarrative(sectionMetrics as TechnicianRanking[]);
       case "opportunities":

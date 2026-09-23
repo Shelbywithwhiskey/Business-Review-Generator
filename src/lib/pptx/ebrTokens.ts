@@ -1,5 +1,5 @@
 import type { DateRange } from "@/lib/zuper/modules";
-import { computeJobMetrics, computePaymentMetrics } from "@/lib/analytics";
+import { computeJobMetrics, computeLineItemUsage, computePaymentMetrics, type LineItemUsage } from "@/lib/analytics";
 import {
   computeQuoteBreakdown,
   computeInvoiceBreakdown,
@@ -9,6 +9,7 @@ import {
   computeMonthlySeries,
   computeWorkflowSummary,
   computeRecommendationSignals,
+  type WorkflowSummary,
 } from "@/lib/reports/ebrMetrics";
 import { generateBusinessRecommendations } from "@/lib/ai";
 import { fetchWebsiteContext } from "@/lib/website";
@@ -64,6 +65,10 @@ export interface EbrTokenData {
     chart5: LineChartData; // monthly avg invoice value
     chart6: LineChartData; // monthly unaccepted quote value
   };
+  /** Feed the generated (non-template) slides — see lib/pptx/usageSlide.ts and automationSlide.ts. */
+  usage: LineItemUsage;
+  workflowSummary: WorkflowSummary;
+  periodLabel: string;
 }
 
 export async function buildEbrTokenData(
@@ -73,7 +78,7 @@ export async function buildEbrTokenData(
   range: DateRange,
   reportTitle: string
 ): Promise<EbrTokenData> {
-  const [jobs, quotes, invoices, payments, topCategories, footprint, quarters, months, workflowSummary, websiteContext] =
+  const [jobs, quotes, invoices, payments, topCategories, footprint, quarters, months, workflowSummary, websiteContext, usage] =
     await Promise.all([
       computeJobMetrics(customerId, range),
       computeQuoteBreakdown(customerId, range),
@@ -83,8 +88,9 @@ export async function buildEbrTokenData(
       computeFootprintComparison(customerId, range),
       computeQuarterlySeries(customerId, range, 4),
       computeMonthlySeries(customerId, range, 13),
-      computeWorkflowSummary(customerId),
+      computeWorkflowSummary(customerId, range),
       customerWebsite ? fetchWebsiteContext(customerWebsite) : Promise.resolve(null),
+      computeLineItemUsage(customerId, range),
     ]);
 
   const [cat1, cat2, cat3] = topCategories;
@@ -260,7 +266,8 @@ export async function buildEbrTokenData(
     // Platform Performance slide — only fields the API actually exposes are populated
     // (see ebrMetrics.computeWorkflowSummary comment); API calls/latency/attachments/
     // runs/success-rate/contracted-users are filled with a literal "N/A" in the template.
-    WF_ACTIVE_OF_TOTAL: `${fmtInt(workflowSummary.active)} of ${fmtInt(workflowSummary.total)}`,
+    // "Live" (active + published), not just is_active — an active draft never runs.
+    WF_ACTIVE_OF_TOTAL: `${fmtInt(workflowSummary.live)} of ${fmtInt(workflowSummary.total)}`,
     WF_JOBS_CREATED: fmtInt(jobs.total),
     WF_INVOICE_VALUE: fmtMoneyM(invoices.totalValue),
     WF_ACTIVE_USERS: fmtInt(footprint.activeUserCount),
@@ -279,6 +286,7 @@ export async function buildEbrTokenData(
     paymentsTotalValue: payments.totalAmount,
     activeWorkflowCount: workflowSummary.active,
     totalWorkflowCount: workflowSummary.total,
+    workflowsNeedingAttention: workflowSummary.needsAttention,
     jobsTotal: jobs.total,
   });
   const recommendations = await generateBusinessRecommendations(signals, websiteContext, reportTitle);
@@ -325,5 +333,5 @@ export async function buildEbrTokenData(
     },
   };
 
-  return { tokens, charts };
+  return { tokens, charts, usage, workflowSummary, periodLabel };
 }

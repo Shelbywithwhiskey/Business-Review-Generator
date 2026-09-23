@@ -30,8 +30,9 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
   const { id } = usePromise(params);
   const router = useRouter();
   const [customer, setCustomer] = useState<Customer | null>(null);
+  // Held in component state only for the next sync/test — never saved server-side or in browser storage.
   const [apiKey, setApiKey] = useState("");
-  const [savingKey, setSavingKey] = useState(false);
+  const [testingKey, setTestingKey] = useState(false);
   const [verifyResult, setVerifyResult] = useState<string | null>(null);
   const [credentialError, setCredentialError] = useState<string | null>(null);
   const [period, setPeriod] = useState(defaultPeriod());
@@ -70,29 +71,21 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
-  async function saveApiKey(e: React.FormEvent) {
-    e.preventDefault();
-    setSavingKey(true);
+  async function testConnection() {
+    setTestingKey(true);
     setCredentialError(null);
+    setVerifyResult(null);
     const res = await fetch(`/api/customers/${id}/credentials`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ apiKey }),
     });
-    setSavingKey(false);
+    setTestingKey(false);
+    const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      setCredentialError(data.error ?? "Failed to save API key");
+      setCredentialError(data.error ?? "Connection test failed");
       return;
     }
-    setApiKey("");
-    await loadCustomer();
-  }
-
-  async function verifyConnection() {
-    setVerifyResult("Checking…");
-    const res = await fetch(`/api/customers/${id}/credentials`, { method: "PATCH" });
-    const data = await res.json();
     setVerifyResult(data.ok ? "Connection verified" : "Could not connect — check the API key");
     await loadCustomer();
   }
@@ -103,7 +96,7 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
     const res = await fetch(`/api/customers/${id}/sync`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ periodStart: period.start, periodEnd: period.end }),
+      body: JSON.stringify({ apiKey, periodStart: period.start, periodEnd: period.end }),
     });
     setSyncing(false);
     if (!res.ok) {
@@ -112,6 +105,7 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
       await loadCustomer();
       return;
     }
+    setApiKey("");
     await loadCustomer();
     await loadMetrics();
   }
@@ -184,38 +178,33 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
 
         <section className="rounded-lg border border-neutral-200 p-5 dark:border-neutral-800">
           <h2 className="mb-3 font-medium">Zuper API connection</h2>
-          {customer.credential ? (
-            <p className="mb-3 text-sm text-neutral-500">
-              Key saved · {customer.credential.lastVerifiedAt ? `verified ${new Date(customer.credential.lastVerifiedAt).toLocaleString()}` : "not yet verified"}
-            </p>
-          ) : (
-            <p className="mb-3 text-sm text-neutral-500">No API key saved yet.</p>
-          )}
-          <form onSubmit={saveApiKey} className="mb-3 flex gap-2">
+          <p className="mb-3 text-sm text-neutral-500">
+            {customer.credential?.lastVerifiedAt
+              ? `Last verified ${new Date(customer.credential.lastVerifiedAt).toLocaleString()}`
+              : "Not verified yet"}
+          </p>
+          <div className="mb-3 flex gap-2">
             <input
               type="password"
+              autoComplete="off"
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
               placeholder="Zuper API key"
               className="flex-1 rounded-md border border-neutral-300 px-3 py-2 text-sm dark:border-neutral-700 dark:bg-neutral-900"
             />
             <button
-              type="submit"
-              disabled={savingKey || !apiKey}
-              className="rounded-md bg-neutral-900 px-3 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-neutral-100 dark:text-neutral-900"
+              onClick={testConnection}
+              disabled={testingKey || !apiKey}
+              className="rounded-md border border-neutral-300 px-3 py-2 text-sm disabled:opacity-50 dark:border-neutral-700"
             >
-              {savingKey ? "Saving…" : "Save key"}
+              {testingKey ? "Testing…" : "Test connection"}
             </button>
-          </form>
+          </div>
           <p className="mb-3 text-xs text-neutral-400">
-            The correct Zuper data center is auto-discovered from the Zuper account ID above.
+            The key is never saved — enter it each time you sync. It&apos;s cleared once a sync finishes. The Zuper data
+            center is auto-discovered from the account ID above.
           </p>
           {credentialError && <p className="mb-2 text-sm text-red-500">{credentialError}</p>}
-          {customer.credential && (
-            <button onClick={verifyConnection} className="text-sm underline">
-              Test connection
-            </button>
-          )}
           {verifyResult && <p className="mt-2 text-sm text-neutral-500">{verifyResult}</p>}
         </section>
 
@@ -242,7 +231,7 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
             </div>
             <button
               onClick={runSync}
-              disabled={syncing || !customer.credential}
+              disabled={syncing || !apiKey}
               className="rounded-md bg-neutral-900 px-3 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-neutral-100 dark:text-neutral-900"
             >
               {syncing ? "Syncing… (this can take a bit)" : "Sync from Zuper"}
@@ -255,9 +244,7 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
               {loadingMetrics ? "Loading…" : "Load metrics"}
             </button>
           </div>
-          {!customer.credential && (
-            <p className="text-sm text-amber-600">Save a Zuper API key above before syncing.</p>
-          )}
+          {!apiKey && <p className="text-sm text-amber-600">Enter the Zuper API key above to sync.</p>}
           {syncError && <p className="text-sm text-red-500">{syncError}</p>}
           {latestSync && (
             <p className="text-sm text-neutral-500">

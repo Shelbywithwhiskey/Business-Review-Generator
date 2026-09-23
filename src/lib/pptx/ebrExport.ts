@@ -4,6 +4,8 @@ import JSZip from "jszip";
 import type { DateRange } from "@/lib/zuper/modules";
 import { buildEbrTokenData } from "./ebrTokens";
 import { injectLineChartData } from "./chartData";
+import { insertUsageSlide } from "./usageSlide";
+import { insertAutomationSlide } from "./automationSlide";
 
 const TEMPLATE_PATH = path.join(process.cwd(), "templates", "ebr-template.pptx");
 
@@ -39,7 +41,7 @@ export interface GenerateEbrPptxOptions {
 export async function generateEbrPptx(options: GenerateEbrPptxOptions): Promise<Buffer> {
   const { customerId, customerName, customerWebsite, range, reportTitle } = options;
 
-  const [templateBuffer, { tokens, charts }] = await Promise.all([
+  const [templateBuffer, { tokens, charts, usage, workflowSummary, periodLabel }] = await Promise.all([
     readFile(TEMPLATE_PATH),
     buildEbrTokenData(customerId, customerName, customerWebsite ?? null, range, reportTitle),
   ]);
@@ -65,6 +67,9 @@ export async function generateEbrPptx(options: GenerateEbrPptxOptions): Promise<
       }
     }
   }
+
+  await insertUsageSlide(zip, usage, periodLabel);
+  await insertAutomationSlide(zip, workflowSummary, customerName, periodLabel);
 
   const buffer = await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
   return buffer;

@@ -21,6 +21,18 @@ export interface NormalizedJob {
   scheduledAt: Date | null;
 }
 
+export interface NormalizedJobLineItem {
+  position: number;
+  productUid: string | null;
+  name: string;
+  productType: string;
+  category: string | null;
+  quantity: number;
+  unitPrice: number;
+  total: number;
+  purchasePrice: number;
+}
+
 export interface NormalizedInvoice {
   zuperInvoiceId: string;
   invoiceNo: number | null;
@@ -121,6 +133,15 @@ export interface NormalizedWorkflow {
   description: string | null;
   isActive: boolean;
   isAiGenerated: boolean;
+  isPublished: boolean;
+  lastPublishedAt: Date | null;
+  needsAttention: boolean;
+  triggerName: string | null;
+  triggerKey: string | null;
+  triggerModule: string | null;
+  stepCount: number;
+  actionKeys: string[];
+  lastExecutionStatus: string | null;
   lastExecutionTime: Date | null;
   createdAt: Date;
   updatedAt: Date;
@@ -137,10 +158,31 @@ export const jobsModule = {
   key: "jobs" as const,
   async *fetch(client: ZuperClient) {
     for await (const page of client.paginate<Record<string, any>>("jobs")) {
-      yield page.map(normalizeJob);
+      yield page.map((raw) => ({ job: normalizeJob(raw), lineItems: normalizeJobLineItems(raw) }));
     }
   },
 };
+
+/** The job's inline `products` array — product_type is PARTS | PRODUCT | SERVICE. */
+function normalizeJobLineItems(raw: Record<string, any>): NormalizedJobLineItem[] {
+  const items = (raw.products as Record<string, any>[] | undefined) ?? [];
+  return items.map((item, position) => {
+    const quantity = Number(item.quantity ?? 0);
+    const unitPrice = Number(item.price ?? 0);
+    const category = item.product_category;
+    return {
+      position,
+      productUid: item.product_uid ?? null,
+      name: item.product_name || "Unnamed item",
+      productType: String(item.product_type ?? "UNKNOWN").toUpperCase(),
+      category: typeof category === "string" ? category || null : (category?.category_name ?? null),
+      quantity,
+      unitPrice,
+      total: item.total != null ? Number(item.total) : quantity * unitPrice,
+      purchasePrice: Number(item.purchase_price ?? 0),
+    };
+  });
+}
 
 function normalizeJob(raw: Record<string, any>): NormalizedJob {
   const statusType = String(raw.current_job_status?.status_type ?? "").toUpperCase();
@@ -393,23 +435,42 @@ function normalizeEndCustomer(raw: Record<string, any>): NormalizedEndCustomer {
   };
 }
 
-/** Runs against a Workflow Builder client (separate host — see ApiCredential.workflowBaseUrl), not the main API client. */
+/** Runs against a Workflow Builder client (separate host — see ApiCredential.workflowBaseUrl), not the main API client.
+ * The list omits the node graph, so each workflow's detail is fetched too (accounts have tens, not thousands). */
 export const workflowsModule = {
   key: "workflows" as const,
   async *fetch(client: ZuperClient) {
     for await (const page of client.paginate<Record<string, any>>("workflows")) {
-      yield page.map(normalizeWorkflow);
+      const details = await Promise.all(
+        page.map((raw) => client.get<Record<string, any>>(`workflows/${raw.workflow_uid}`).catch(() => null))
+      );
+      yield page.map((raw, i) => normalizeWorkflow(raw, details[i]));
     }
   },
 };
 
-function normalizeWorkflow(raw: Record<string, any>): NormalizedWorkflow {
+function normalizeWorkflow(raw: Record<string, any>, detail: Record<string, any> | null): NormalizedWorkflow {
+  // Published graph is what actually runs; fall back to the draft for never-published workflows.
+  const liveNodes = Array.isArray(detail?.live_nodes) ? detail.live_nodes : [];
+  const nodes: Record<string, any>[] = liveNodes.length ? liveNodes : Array.isArray(detail?.nodes) ? detail.nodes : [];
+  const trigger = nodes.find((n) => n.action_type === "TRIGGER");
+  const actions = nodes.filter((n) => n.action_type === "ACTION");
+
   return {
     zuperWorkflowId: String(raw.workflow_uid),
     name: raw.workflow_name ?? "Untitled workflow",
     description: raw.workflow_description || null,
     isActive: Boolean(raw.is_active),
     isAiGenerated: Boolean(raw.is_ai_generated),
+    isPublished: Boolean(detail?.live_version),
+    lastPublishedAt: detail?.last_published_date ? new Date(detail.last_published_date) : null,
+    needsAttention: Boolean(raw.needs_attention),
+    triggerName: trigger?.action_name ?? null,
+    triggerKey: trigger?.action_key ?? null,
+    triggerModule: trigger?.module || null,
+    stepCount: actions.length,
+    actionKeys: actions.map((n) => String(n.action_key ?? "unknown")),
+    lastExecutionStatus: detail?.last_execution_status ?? null,
     lastExecutionTime: raw.last_execution_time ? new Date(raw.last_execution_time) : null,
     createdAt: new Date(raw.created_at),
     updatedAt: new Date(raw.updated_at),

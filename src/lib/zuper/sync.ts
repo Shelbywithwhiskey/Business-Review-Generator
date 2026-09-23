@@ -1,6 +1,5 @@
 import { prisma } from "@/lib/db";
-import { decryptSecret } from "@/lib/crypto";
-import { ZuperClient } from "./client";
+import { ZuperClient, discoverZuperConfig } from "./client";
 import {
   jobsModule,
   invoicesModule,
@@ -30,13 +29,26 @@ export const ALL_MODULES: ModuleKey[] = [
   "workflows",
 ];
 
+/** Discovered data-center config for a customer, resolving and saving it on first use. Holds no secrets. */
+export async function getOrDiscoverConnection(customerId: string) {
+  const existing = await prisma.apiCredential.findUnique({ where: { customerId } });
+  if (existing) return existing;
+  const customer = await prisma.customer.findUnique({ where: { id: customerId } });
+  if (!customer) throw new Error("Customer not found");
+  const config = await discoverZuperConfig(customer.zuperAccountId);
+  return prisma.apiCredential.create({
+    data: { customerId, baseUrl: config.apiBaseUrl, workflowBaseUrl: config.workflowBaseUrl },
+  });
+}
+
+/** apiKey is supplied by the user for this sync only — it is never persisted or logged. */
 export async function runSync(
   customerId: string,
+  apiKey: string,
   range: DateRange,
   modules: ModuleKey[] = ALL_MODULES
 ): Promise<{ syncRunId: string }> {
-  const credential = await prisma.apiCredential.findUnique({ where: { customerId } });
-  if (!credential) throw new Error("No API credential saved for this customer");
+  const credential = await getOrDiscoverConnection(customerId);
 
   const syncRun = await prisma.syncRun.create({
     data: {
@@ -49,13 +61,13 @@ export async function runSync(
     },
   });
 
-  const client = new ZuperClient(decryptSecret(credential.encryptedApiKey), credential.baseUrl);
+  const client = new ZuperClient(apiKey, credential.baseUrl);
 
   try {
     if (modules.includes("jobs")) {
       for await (const page of jobsModule.fetch(client)) {
         await Promise.all(
-          page.map((job) =>
+          page.map(({ job }) =>
             prisma.job.upsert({
               where: { customerId_zuperJobId: { customerId, zuperJobId: job.zuperJobId } },
               create: { ...job, customerId, syncRunId: syncRun.id },
@@ -63,6 +75,23 @@ export async function runSync(
             })
           )
         );
+        // Line items have no stable uid in the list payload, so each job's set is replaced wholesale.
+        await prisma.$transaction([
+          prisma.jobLineItem.deleteMany({
+            where: { customerId, zuperJobId: { in: page.map(({ job }) => job.zuperJobId) } },
+          }),
+          prisma.jobLineItem.createMany({
+            data: page.flatMap(({ job, lineItems }) =>
+              lineItems.map((item) => ({
+                ...item,
+                customerId,
+                zuperJobId: job.zuperJobId,
+                jobCreatedAt: job.createdAt,
+                syncRunId: syncRun.id,
+              }))
+            ),
+          }),
+        ]);
       }
     }
 
@@ -197,7 +226,7 @@ export async function runSync(
     // Workflow Builder lives on a separate host — skip quietly if it was never
     // discovered (older credential, or the account has no Workflow Builder access).
     if (modules.includes("workflows") && credential.workflowBaseUrl) {
-      const workflowClient = new ZuperClient(decryptSecret(credential.encryptedApiKey), credential.workflowBaseUrl);
+      const workflowClient = new ZuperClient(apiKey, credential.workflowBaseUrl);
       for await (const page of workflowsModule.fetch(workflowClient)) {
         await Promise.all(
           page.map((workflow) =>
@@ -209,6 +238,8 @@ export async function runSync(
           )
         );
       }
+      // The list is the full current set, so anything not re-seen was deleted in Zuper.
+      await prisma.workflow.deleteMany({ where: { customerId, syncRunId: { not: syncRun.id } } });
     }
 
     // Rollups derived from raw synced rows, not from the Zuper API directly.

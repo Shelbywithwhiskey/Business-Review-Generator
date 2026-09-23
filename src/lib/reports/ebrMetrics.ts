@@ -194,6 +194,7 @@ export interface RecommendationEvidence {
   paymentsTotalValue: number;
   activeWorkflowCount: number;
   totalWorkflowCount: number;
+  workflowsNeedingAttention: number;
   jobsTotal: number;
 }
 
@@ -229,6 +230,14 @@ export function computeRecommendationSignals(evidence: RecommendationEvidence): 
     });
   }
 
+  if (evidence.workflowsNeedingAttention > 0) {
+    signals.push({
+      key: "workflows_need_attention",
+      title: "Fix Flagged Workflows",
+      detail: `${evidence.workflowsNeedingAttention} workflow(s) are flagged by Workflow Builder as needing attention — a broken automation silently pushes that work back onto the team, so these are worth fixing first.`,
+    });
+  }
+
   if (evidence.totalWorkflowCount === 0 && evidence.jobsTotal > 50) {
     signals.push({
       key: "no_workflows",
@@ -250,34 +259,129 @@ export function computeRecommendationSignals(evidence: RecommendationEvidence): 
 export interface WorkflowRow {
   name: string;
   isActive: boolean;
+  isLive: boolean;
+  needsAttention: boolean;
+  triggerName: string | null;
+  stepCount: number;
+  lastExecutionStatus: string | null;
   lastExecutionTime: Date | null;
+}
+
+export type AutomationCategory = "notifications" | "recordUpdates" | "recordCreation" | "integrations" | "lookups" | "logic";
+
+/** Categories that are plumbing inside a workflow (branching, code, lookups) rather than manual work it replaces. */
+export const PLUMBING_CATEGORIES: AutomationCategory[] = ["lookups", "logic"];
+
+export const AUTOMATION_CATEGORY_LABELS: Record<AutomationCategory, string> = {
+  notifications: "Emails & notifications",
+  recordUpdates: "Record updates",
+  recordCreation: "Records created (e.g. invoices)",
+  integrations: "External system calls",
+  lookups: "Data lookups",
+  logic: "Logic & data handling",
+};
+
+/** Buckets a Workflow Builder action_key into the kind of manual work it replaces. */
+export function categorizeAction(actionKey: string): AutomationCategory {
+  const k = actionKey.toLowerCase();
+  if (k.includes("email") || k.includes("sms") || k.includes("notification")) return "notifications";
+  if (k === "zuper_update" || k === "zuper_custom_field") return "recordUpdates";
+  if (k === "zuper_create") return "recordCreation";
+  if (k === "http_request") return "integrations";
+  if (k === "zuper_get_record" || k === "zuper_job_details") return "lookups";
+  return "logic";
 }
 
 export interface WorkflowSummary {
   total: number;
+  /** Active + published — the only workflows that actually run. */
+  live: number;
   active: number;
   inactive: number;
-  /** Sorted by lastExecutionTime desc (never-run workflows last). Run counts/success rates aren't exposed by the Workflow Builder API — confirmed by testing /workflows/{id}/runs, /executions, /history (all 404). */
+  /** Never published (draft only). */
+  drafts: number;
+  /** Live workflows whose most recent run falls inside the report period — a floor on activity, not a run count. */
+  ranInPeriod: number;
+  needsAttention: number;
+  aiGenerated: number;
+  /** Automated ACTION steps across live workflows. */
+  liveSteps: number;
+  /** Live workflows started by an inbound webhook from another system. */
+  webhookTriggered: number;
+  /** Live workflows' triggers, most common first. */
+  triggers: { name: string; count: number }[];
+  /** Live workflows' steps by kind of work automated, largest first (empty categories omitted). */
+  categories: { key: AutomationCategory; label: string; steps: number; workflows: number }[];
+  /** Live workflows first, then most recently run. Run counts/success rates aren't exposed by the API (see prisma Workflow comment). */
   workflows: WorkflowRow[];
 }
 
-export async function computeWorkflowSummary(customerId: string): Promise<WorkflowSummary> {
-  const rows = await prisma.workflow.findMany({
-    where: { customerId },
-    select: { name: true, isActive: true, lastExecutionTime: true },
-  });
+export interface WorkflowRecord {
+  id: string;
+  name: string;
+  isActive: boolean;
+  isPublished: boolean;
+  isAiGenerated: boolean;
+  needsAttention: boolean;
+  triggerName: string | null;
+  triggerKey: string | null;
+  stepCount: number;
+  actionKeys: string[];
+  lastExecutionStatus: string | null;
+  lastExecutionTime: Date | null;
+}
 
-  const workflows = [...rows].sort((a, b) => {
-    if (!a.lastExecutionTime && !b.lastExecutionTime) return 0;
-    if (!a.lastExecutionTime) return 1;
-    if (!b.lastExecutionTime) return -1;
-    return b.lastExecutionTime.getTime() - a.lastExecutionTime.getTime();
-  });
+export async function computeWorkflowSummary(customerId: string, range: DateRange): Promise<WorkflowSummary> {
+  return summarizeWorkflows(await prisma.workflow.findMany({ where: { customerId } }), range);
+}
+
+export function summarizeWorkflows(rows: WorkflowRecord[], range: DateRange): WorkflowSummary {
+  const isLive = (w: WorkflowRecord) => w.isActive && w.isPublished;
+  const live = rows.filter(isLive);
+
+  const triggerCounts = new Map<string, number>();
+  const categorySteps = new Map<AutomationCategory, { steps: number; workflows: Set<string> }>();
+  for (const w of live) {
+    const trigger = w.triggerName ?? "Unknown trigger";
+    triggerCounts.set(trigger, (triggerCounts.get(trigger) ?? 0) + 1);
+    for (const key of w.actionKeys) {
+      const cat = categorizeAction(key);
+      const entry = categorySteps.get(cat) ?? { steps: 0, workflows: new Set<string>() };
+      entry.steps += 1;
+      entry.workflows.add(w.id);
+      categorySteps.set(cat, entry);
+    }
+  }
+
+  const time = (d: Date | null) => d?.getTime() ?? 0;
+  const workflows = [...rows]
+    .sort((a, b) => Number(isLive(b)) - Number(isLive(a)) || time(b.lastExecutionTime) - time(a.lastExecutionTime))
+    .map((w) => ({
+      name: w.name,
+      isActive: w.isActive,
+      isLive: isLive(w),
+      needsAttention: w.needsAttention,
+      triggerName: w.triggerName,
+      stepCount: w.stepCount,
+      lastExecutionStatus: w.lastExecutionStatus,
+      lastExecutionTime: w.lastExecutionTime,
+    }));
 
   return {
     total: rows.length,
+    live: live.length,
     active: rows.filter((w) => w.isActive).length,
     inactive: rows.filter((w) => !w.isActive).length,
+    drafts: rows.filter((w) => !w.isPublished).length,
+    ranInPeriod: live.filter((w) => w.lastExecutionTime && w.lastExecutionTime >= range.start && w.lastExecutionTime <= range.end).length,
+    needsAttention: rows.filter((w) => w.needsAttention).length,
+    aiGenerated: rows.filter((w) => w.isAiGenerated).length,
+    liveSteps: live.reduce((sum, w) => sum + w.stepCount, 0),
+    webhookTriggered: live.filter((w) => w.triggerKey === "external_webhook").length,
+    triggers: [...triggerCounts.entries()].map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count),
+    categories: [...categorySteps.entries()]
+      .map(([key, v]) => ({ key, label: AUTOMATION_CATEGORY_LABELS[key], steps: v.steps, workflows: v.workflows.size }))
+      .sort((a, b) => b.steps - a.steps),
     workflows,
   };
 }

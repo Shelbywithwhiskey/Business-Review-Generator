@@ -42,7 +42,7 @@ export default async function DashboardPage() {
                     <div className="text-sm text-neutral-500">Zuper account: {c.zuperAccountId}</div>
                   </div>
                   <div className="text-right text-sm text-neutral-500">
-                    <div>{c.credential ? "API key connected" : "No API key yet"}</div>
+                    <div>{c.credential?.lastVerifiedAt ? "Connection verified" : "Not connected yet"}</div>
                     <div>{lastSync ? `Last sync: ${lastSync.status}` : "Never synced"}</div>
                   </div>
                 </Link>

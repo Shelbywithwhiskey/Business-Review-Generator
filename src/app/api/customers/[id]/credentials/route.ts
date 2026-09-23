@@ -1,8 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/db";
-import { encryptSecret, decryptSecret } from "@/lib/crypto";
 import { ZuperClient, discoverZuperConfig } from "@/lib/zuper/client";
+
+// The Zuper API key is never persisted: it's entered by hand for each sync.
+// This route only discovers/saves the (non-secret) data-center URLs and
+// checks that a key the user typed in actually authenticates.
 
 const schema = z.object({
   apiKey: z.string().min(1),
@@ -11,11 +14,12 @@ const schema = z.object({
   baseUrl: z.string().url().optional(),
 });
 
+/** Tests the supplied key against Zuper and saves the discovered connection config (never the key). */
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id: customerId } = await params;
   const body = await req.json();
   const parsed = schema.safeParse(body);
-  if (!parsed.success) return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
+  if (!parsed.success) return NextResponse.json({ error: "A Zuper API key is required" }, { status: 400 });
 
   const customer = await prisma.customer.findUnique({ where: { id: customerId } });
   if (!customer) return NextResponse.json({ error: "Customer not found" }, { status: 404 });
@@ -39,35 +43,19 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     }
   }
 
-  const encryptedApiKey = encryptSecret(parsed.data.apiKey);
-  const credential = await prisma.apiCredential.upsert({
+  const ok = await new ZuperClient(parsed.data.apiKey, baseUrl).testConnection();
+  const connection = await prisma.apiCredential.upsert({
     where: { customerId },
-    create: { customerId, encryptedApiKey, baseUrl, workflowBaseUrl },
-    update: { encryptedApiKey, baseUrl, workflowBaseUrl },
+    create: { customerId, baseUrl, workflowBaseUrl, lastVerifiedAt: ok ? new Date() : null },
+    update: { baseUrl, workflowBaseUrl, ...(ok ? { lastVerifiedAt: new Date() } : {}) },
   });
 
-  return NextResponse.json({ ok: true, baseUrl: credential.baseUrl, workflowBaseUrl: credential.workflowBaseUrl });
+  return NextResponse.json({ ok, baseUrl: connection.baseUrl, workflowBaseUrl: connection.workflowBaseUrl });
 }
 
 export async function GET(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id: customerId } = await params;
-  const credential = await prisma.apiCredential.findUnique({ where: { customerId } });
-  if (!credential) return NextResponse.json({ configured: false });
-  return NextResponse.json({ configured: true, baseUrl: credential.baseUrl, lastVerifiedAt: credential.lastVerifiedAt });
-}
-
-/** Verifies the stored key still authenticates against Zuper without exposing it back to the client. */
-export async function PATCH(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  const { id: customerId } = await params;
-  const credential = await prisma.apiCredential.findUnique({ where: { customerId } });
-  if (!credential) return NextResponse.json({ error: "No credential saved" }, { status: 404 });
-
-  const client = new ZuperClient(decryptSecret(credential.encryptedApiKey), credential.baseUrl);
-  const ok = await client.testConnection();
-
-  if (ok) {
-    await prisma.apiCredential.update({ where: { customerId }, data: { lastVerifiedAt: new Date() } });
-  }
-
-  return NextResponse.json({ ok });
+  const connection = await prisma.apiCredential.findUnique({ where: { customerId } });
+  if (!connection) return NextResponse.json({ configured: false });
+  return NextResponse.json({ configured: true, baseUrl: connection.baseUrl, lastVerifiedAt: connection.lastVerifiedAt });
 }

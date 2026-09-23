@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/db";
 import { getOrCreateDefaultTemplate, DEFAULT_QBR_SECTIONS } from "@/lib/templates";
-import { computeComparison, computeHealthScore, evaluateRules } from "@/lib/analytics";
+import { computeComparison, computeHealthScore, computeLineItemUsage, evaluateRules } from "@/lib/analytics";
 import { generateExecutiveSummary, generateSectionNarrative, generateRecommendation } from "@/lib/ai";
 
 export const maxDuration = 300;
@@ -21,7 +21,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
   const range = { start: new Date(parsed.data.periodStart), end: new Date(parsed.data.periodEnd) };
   const template = await getOrCreateDefaultTemplate();
-  const comparison = await computeComparison(customerId, range);
+  const [comparison, lineItemUsage] = await Promise.all([
+    computeComparison(customerId, range),
+    computeLineItemUsage(customerId, range),
+  ]);
   const health = computeHealthScore(comparison.current);
   const rules = evaluateRules(comparison.current, comparison);
 
@@ -45,6 +48,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     jobs_performance: comparison.current.jobs,
     invoice_performance: comparison.current.invoices,
     quotes_performance: comparison.current.quotes,
+    parts_usage: lineItemUsage,
     technician_performance: comparison.current.technicianRankings,
     key_insights: comparison.current.insights,
     opportunities: rules,
