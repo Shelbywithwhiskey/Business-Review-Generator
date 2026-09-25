@@ -350,10 +350,21 @@ export function connectSlide(ctx: Ctx, calls: ModuleAnalysis | undefined, sms: M
   const c = calls?.calls;
   if (!calls || !c) {
     const box = w.card(CONTENT_X, KPI_Y, CONTENT_W, 4480000, "CONNECT DATA");
+    // A failed sync is not evidence of non-use — say which it is.
+    const failed = callCov?.status === "error";
     const why = callCov ? `${callCov.message ?? callCov.status}` : "Not synced yet";
-    w.empty(box, `No Zuper Connect call data for this account (${why}). If they use Connect, check it's enabled and the API key has access; if not, Connect + CSR Agent is a clear opportunity.`);
+    w.empty(
+      box,
+      failed
+        ? `Zuper Connect call data didn't sync this time (${why}). Run Sync from Zuper again before presenting this slide.`
+        : `No Zuper Connect call data for this account (${why}). If they use Connect, check it's enabled and the API key has access; if not, Connect + CSR Agent is a clear opportunity.`
+    );
     w.keyCallouts(
-      co([{ tone: "opportunity", headline: "No calls or texts are flowing through Zuper Connect", detail: "Connect puts every customer call and text on the job record; CSR Agent answers the overflow.", score: 40, area: "Zuper Connect" }]),
+      co([
+        failed
+          ? { tone: "watch", headline: "Connect call data failed to sync", detail: "re-sync before presenting — this is a sync error, not a sign Connect isn't used.", score: 15, area: "Zuper Connect" }
+          : { tone: "opportunity", headline: "No calls or texts are flowing through Zuper Connect", detail: "Connect puts every customer call and text on the job record; CSR Agent answers the overflow.", score: 40, area: "Zuper Connect" },
+      ]),
       ""
     );
     w.footer("Source: Zuper Connect (telephony calls & SMS conversations)");
@@ -367,7 +378,7 @@ export function connectSlide(ctx: Ctx, calls: ModuleAnalysis | undefined, sms: M
   const answerRate = c.inbound ? c.inboundAnswered / c.inbound : null;
   const openThreads = sms ? sms.breakdowns.find((b) => /done/i.test(b.field))?.values.find((v) => v.name === "false")?.count : undefined;
   w.kpis(KPI_Y, [
-    { value: fmtInt(c.inPeriod), label: `Calls in the period (${fmtInt(c.inbound)} in / ${fmtInt(c.outbound)} out)` },
+    { value: fmtInt(c.inPeriod), label: `Calls (${fmtInt(c.inbound)} in / ${fmtInt(c.outbound)} out)`, spark: c.monthly.map((m) => m.count) },
     { value: answerRate == null ? "—" : pct(answerRate), label: "Inbound calls answered", alert: answerRate != null && answerRate < 0.85 },
     { value: fmtInt(c.inboundMissed), label: "Inbound calls missed / voicemail", alert: c.inboundMissed > 0 },
     { value: c.avgAnswerSec == null ? "—" : `${c.avgAnswerSec.toFixed(0)} s`, label: "Average time to answer" },

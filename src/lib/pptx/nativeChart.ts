@@ -5,7 +5,8 @@
 // Element order inside every c:* node follows the OOXML schema sequence —
 // PowerPoint "repairs" (drops) charts whose children are out of order.
 
-export type ChartKind = "bar" | "column" | "stackedBar" | "stackedColumn" | "line" | "doughnut";
+/** spark = axis-less trend line for stat tiles; area = single-series trend with a soft fill. */
+export type ChartKind = "bar" | "column" | "stackedBar" | "stackedColumn" | "line" | "doughnut" | "spark" | "area";
 
 export interface ChartSeries {
   name: string;
@@ -129,6 +130,30 @@ function plot(spec: ChartSpec): string {
     );
   }
 
+  if (spec.kind === "spark") {
+    // No axes, grid, labels or markers — a 2px trend line with the last point marked.
+    const s = spec.series[0];
+    const last = s.values.length - 1;
+    const endDot = `<c:dPt><c:idx val="${last}"/><c:marker><c:symbol val="circle"/><c:size val="5"/><c:spPr><a:solidFill><a:srgbClr val="${s.color}"/></a:solidFill><a:ln w="9525"><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill></a:ln></c:spPr></c:marker><c:bubble3D val="0"/></c:dPt>`;
+    return (
+      `<c:lineChart><c:grouping val="standard"/><c:varyColors val="0"/><c:ser><c:idx val="0"/><c:order val="0"/><c:tx><c:v>${esc(s.name)}</c:v></c:tx>` +
+      `<c:spPr><a:ln w="19050" cap="rnd"><a:solidFill><a:srgbClr val="${s.color}"/></a:solidFill><a:round/></a:ln></c:spPr><c:marker><c:symbol val="none"/></c:marker>${endDot}` +
+      `${dLbls(format, null, false)}${cat}<c:val>${numLit(s.values, format)}</c:val><c:smooth val="0"/></c:ser><c:marker val="1"/><c:axId val="1001"/><c:axId val="1002"/></c:lineChart>` +
+      `<c:catAx><c:axId val="1001"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="1"/><c:axPos val="b"/><c:majorTickMark val="none"/><c:minorTickMark val="none"/><c:tickLblPos val="none"/><c:crossAx val="1002"/><c:crosses val="autoZero"/><c:auto val="1"/><c:lblAlgn val="ctr"/><c:lblOffset val="100"/><c:noMultiLvlLbl val="0"/></c:catAx>` +
+      `<c:valAx><c:axId val="1002"/><c:scaling><c:orientation val="minMax"/><c:min val="0"/></c:scaling><c:delete val="1"/><c:axPos val="l"/><c:numFmt formatCode="General" sourceLinked="0"/><c:majorTickMark val="none"/><c:minorTickMark val="none"/><c:tickLblPos val="none"/><c:crossAx val="1001"/><c:crosses val="autoZero"/><c:crossBetween val="between"/></c:valAx>`
+    );
+  }
+
+  if (spec.kind === "area") {
+    const s = spec.series[0];
+    return (
+      `<c:areaChart><c:grouping val="standard"/><c:varyColors val="0"/><c:ser><c:idx val="0"/><c:order val="0"/><c:tx><c:v>${esc(s.name)}</c:v></c:tx>` +
+      `<c:spPr><a:solidFill><a:srgbClr val="${s.color}"><a:alpha val="22000"/></a:srgbClr></a:solidFill><a:ln w="25400" cap="rnd"><a:solidFill><a:srgbClr val="${s.color}"/></a:solidFill><a:round/></a:ln></c:spPr>` +
+      `${dLbls(format, null, spec.showValues ?? false)}${cat}<c:val>${numLit(s.values, format)}</c:val></c:ser>` +
+      `<c:axId val="1001"/><c:axId val="1002"/></c:areaChart>${axes(false, format, integerStep(spec, format))}`
+    );
+  }
+
   if (spec.kind === "line") {
     const sers = spec.series
       .map(
@@ -160,7 +185,7 @@ function plot(spec: ChartSpec): string {
 
 export function buildChartXml(spec: ChartSpec): string {
   const legend =
-    (spec.showLegend ?? (spec.kind === "doughnut" || spec.series.length > 1))
+    spec.kind !== "spark" && (spec.showLegend ?? (spec.kind === "doughnut" || spec.series.length > 1))
       ? `<c:legend><c:legendPos val="${spec.kind === "doughnut" ? "r" : "t"}"/><c:overlay val="0"/>${txPr(800, INK)}</c:legend>`
       : "";
   return (

@@ -104,6 +104,8 @@ export interface JobDeepDive {
   recurringShare: number;
   unscheduledOpen: number;
   highPriority: number;
+  /** Jobs created in the period that were scheduled (flagged scheduled, or reached a Scheduled status). */
+  scheduled: number;
   monthly: { label: string; created: number; completed: number }[];
   categories: { name: string; created: number; completed: number }[];
   /** Hours from job creation to first SCHEDULED status (jobs that were scheduled). */
@@ -189,6 +191,7 @@ export async function computeJobDeepDive(customerId: string, range: DateRange): 
     recurringShare: jobs.length ? jobs.filter((j) => j.isRecurring).length / jobs.length : 0,
     unscheduledOpen: jobs.filter((j) => !j.isScheduled && j.status !== "completed" && j.status !== "cancelled").length,
     highPriority: jobs.filter((j) => /high|urgent/i.test(j.priority ?? "")).length,
+    scheduled: jobs.filter((j) => j.isScheduled || ((Array.isArray(j.statusHistory) ? j.statusHistory : []) as unknown as JobStatusEntry[]).some((h) => h.type === "SCHEDULED")).length,
     monthly,
     categories,
     medianHoursToSchedule: median(toSchedule.filter((h) => h >= 0)),

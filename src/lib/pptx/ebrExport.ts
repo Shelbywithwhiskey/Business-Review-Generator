@@ -59,7 +59,7 @@ export interface GenerateEbrPptxOptions {
 export async function generateEbrPptx(options: GenerateEbrPptxOptions): Promise<Buffer> {
   const { customerId, customerName, customerWebsite, range, reportTitle } = options;
 
-  const shared = await computeSharedDeckData(customerId, range);
+  const shared = await computeSharedDeckData(customerId, range, customerWebsite ?? null);
   const [templateBuffer, { tokens, charts, usage, workflowSummary, periodLabel, fixups, notes, callouts }] = await Promise.all([
     readFile(TEMPLATE_PATH),
     buildEbrTokenData(customerId, customerName, customerWebsite ?? null, range, reportTitle, shared),

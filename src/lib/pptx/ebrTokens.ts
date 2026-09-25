@@ -24,6 +24,8 @@ import {
 } from "@/lib/reports/moduleMetrics";
 import { computeCatalogAnalyses, computeJobServiceDelivery, type JobServiceDelivery, type ModuleAnalysis } from "@/lib/reports/catalogMetrics";
 import { momentum, rank, type Callout } from "@/lib/reports/callouts";
+import { computeJourney, type Journey } from "@/lib/reports/journey";
+import type { WebsiteContext } from "@/lib/website";
 import { generateBusinessRecommendations } from "@/lib/ai";
 import { fetchWebsiteContext } from "@/lib/website";
 import { niceAxisMax, type LineChartData } from "./chartData";
@@ -102,18 +104,22 @@ export interface SharedDeckData {
   quotesDeep: QuoteDeepDive;
   exec: ExecutionDeepDive;
   sync: SyncInfo;
+  journey: Journey;
+  website: WebsiteContext | null;
 }
 
-export async function computeSharedDeckData(customerId: string, range: DateRange): Promise<SharedDeckData> {
-  const [catalog, delivery, jobsDeep, quotesDeep, exec, sync] = await Promise.all([
+export async function computeSharedDeckData(customerId: string, range: DateRange, customerWebsite: string | null = null): Promise<SharedDeckData> {
+  const [catalog, delivery, jobsDeep, quotesDeep, exec, sync, journey, website] = await Promise.all([
     computeCatalogAnalyses(customerId, range),
     computeJobServiceDelivery(customerId, range),
     computeJobDeepDive(customerId, range),
     computeQuoteDeepDive(customerId, range),
     computeExecutionDeepDive(customerId, range),
     computeSyncInfo(customerId, range),
+    computeJourney(customerId, range),
+    customerWebsite ? fetchWebsiteContext(customerWebsite) : Promise.resolve(null),
   ]);
-  return { catalog, delivery, jobsDeep, quotesDeep, exec, sync };
+  return { catalog, delivery, jobsDeep, quotesDeep, exec, sync, journey, website };
 }
 
 export async function buildEbrTokenData(
@@ -136,7 +142,7 @@ export async function buildEbrTokenData(
       computeQuarterlySeries(customerId, range, 4),
       computeMonthlySeries(customerId, range, 13),
       computeWorkflowSummary(customerId, range),
-      customerWebsite ? fetchWebsiteContext(customerWebsite) : Promise.resolve(null),
+      Promise.resolve(shared.website), // fetched once in computeSharedDeckData
       computeLineItemUsage(customerId, range),
       computeAccountActivityDates(customerId),
     ]);

@@ -24,6 +24,10 @@ import { SETUP_MODULES, connectSlide, coverageSlides, insertChain, jobServiceSli
 import { INVOICE_COLLECTION_DEFINITION, QUOTE_ACCEPTANCE_DEFINITION } from "@/lib/reports/classify";
 import { momentum, topAcross, type Callout } from "@/lib/reports/callouts";
 import type { SharedDeckData } from "./ebrTokens";
+import { detectIndustry, type MetricKey } from "@/lib/reports/industry";
+import type { CallSummary } from "@/lib/reports/catalogMetrics";
+import { generateStoryNarrative } from "@/lib/ai";
+import { METRIC_TITLES, flowSlide, growthSlide, industrySlide, journeySlide, thenNowSlide, type MetricReading } from "./storySlides";
 
 const compact = (xs: (string | number | null | false | undefined)[]) => xs.filter((x): x is string => typeof x === "string" && x.length > 0);
 type MaybeCallout = Callout | null | undefined | false | 0 | "";
@@ -192,7 +196,7 @@ function jobsVolumeSlide(ctx: DeckContext, j: JobDeepDive): ShapeWriter {
   const w = new ShapeWriter();
   w.header("Jobs — Volume & Mix", `Jobs created ${periodText(ctx.range)}  ·  ${fmtInt(j.created)} jobs`);
   w.kpis(KPI_Y, [
-    { value: fmtInt(j.created), label: "Jobs created" },
+    { value: fmtInt(j.created), label: "Jobs created", spark: j.monthly.map((m) => m.created) },
     { value: fmtInt(j.completed), label: `Completed (${pct(j.completionRate)})` },
     { value: fmtInt(j.cancelled), label: "Cancelled" },
     { value: pct(j.recurringShare, 0), label: "Recurring jobs" },
@@ -673,7 +677,7 @@ function quotesSlide(ctx: DeckContext, q: QuoteDeepDive): ShapeWriter {
   const w = new ShapeWriter();
   w.header("Quotes — Pipeline & Conversion", `Quotes created ${periodText(ctx.range)}  ·  ${plural(q.count, "quote")} · ${fmtMoneyCompact(q.value)}`);
   w.kpis(KPI_Y, [
-    { value: fmtInt(q.count), label: `Quotes created (${fmtMoneyCompact(q.value)})` },
+    { value: fmtInt(q.count), label: `Quotes created (${fmtMoneyCompact(q.value)})`, spark: q.monthly.map((m) => m.created) },
     { value: pct(q.conversionRate), label: `Approved / converted (${fmtInt(q.convertedCount)})` },
     { value: fmtMoneyCompact(q.convertedValue), label: "Value won" },
     { value: q.medianDaysToAccept == null ? "—" : `${q.medianDaysToAccept.toFixed(1)} days`, label: "Median days to approval" },
@@ -1098,6 +1102,122 @@ export async function insertModuleSlides(zip: JSZip, input: ModuleDeckInput): Pr
     ...coverageSlides(cctx, coverage),
   ]);
 
+  // ---- Story: industry lens, journey on Zuper, then vs now, growth; and the work/money flow ----------
+  const industry = detectIndustry({
+    website: shared.website,
+    customerName: input.customerName,
+    jobCategories: jobs.categories.filter((c) => !c.name.startsWith("Other")).map((c) => ({ name: c.name, count: c.created })),
+    lineItemNames: input.usage.byType.flatMap((t) => t.usage.top.map((x) => x.name)),
+  });
+  const calls = byKey.get("connect_calls")?.calls;
+  const readings = industryReadings({ jobs, quotes, invoices, accounts, delivery, exec, calls, workflowLive: input.workflowSummary.live });
+  const matterFacts = Object.fromEntries(industry.whatMatters.map((m) => [METRIC_TITLES[m.metric], readings[m.metric] ? `${readings[m.metric]!.value} (${readings[m.metric]!.note})` : "not measured"]));
+  const industryFallback =
+    `${input.customerName} runs a ${industry.label.toLowerCase()} operation on Zuper. ` +
+    industry.whatMatters
+      .slice(0, 3)
+      .map((m) => (readings[m.metric] ? `${METRIC_TITLES[m.metric]}: ${readings[m.metric]!.value}` : null))
+      .filter(Boolean)
+      .join("; ") +
+    ".";
+  const j = shared.journey;
+  const better = j.metrics.filter((m) => m.improved);
+  const journeyFacts = {
+    onZuperSince: j.goLive?.toISOString().slice(0, 7),
+    monthsOnZuper: j.monthsOnZuper,
+    totals: { jobs: fmtInt(j.totals.jobs), invoiced: fmtMoneyCompact(j.totals.invoiced), collected: fmtMoneyCompact(j.totals.collected) },
+    changes: j.metrics.map((m) => ({ metric: m.label, then: storyValue(m, m.early), now: storyValue(m, m.now), better: m.improved })),
+  };
+  const journeyFallback = j.goLive
+    ? `On Zuper for ${j.monthsOnZuper} months, ${input.customerName} has run ${fmtInt(j.totals.jobs)} jobs${j.uses.invoices ? ` and invoiced ${fmtMoneyCompact(j.totals.invoiced)}` : ""} through the platform.` +
+      (better[0] ? ` Since the early months, ${better[0].label.toLowerCase()} has gone from ${storyValue(better[0], better[0].early)} to ${storyValue(better[0], better[0].now)}.` : "")
+    : "No activity recorded yet.";
+  const [industryNarrative, journeyNarrative] = await Promise.all([
+    generateStoryNarrative("industry", { customer: input.customerName, trade: industry.label, whatMattersAndTheirNumbers: matterFacts }, shared.website, industryFallback),
+    generateStoryNarrative("journey", journeyFacts, shared.website, journeyFallback),
+  ]);
+  await insertChain(zip, scope, [
+    industrySlide(cctx, industry, readings, industryNarrative),
+    journeySlide(cctx, j, journeyNarrative),
+    thenNowSlide(cctx, j),
+    growthSlide(cctx, j),
+  ]);
+  const inv = shared.quotesDeep;
+  await insertGeneratedSlide(
+    zip,
+    "ppt/slides/slide13.xml",
+    flowSlide(cctx, {
+      jobsCreated: jobs.created,
+      jobsScheduled: jobs.scheduled,
+      jobsCompleted: jobs.completed,
+      quotedValue: inv.value,
+      quotesCount: inv.count,
+      acceptedValue: inv.convertedValue,
+      acceptedCount: inv.convertedCount,
+      invoicedValue: invoices.invoiced,
+      invoiceCount: invoices.count,
+      collectedValue: invoices.collected,
+      moneyInZuper: j.uses.quotes || j.uses.invoices,
+    })
+  );
+
   // Executive summary, placed right after the scope slide once every slide's call-outs exist.
   await insertGeneratedSlide(zip, scope, topCalloutsSlide(ctx, topAcross(collectedCallouts(zip), 6, 2)));
+}
+
+function storyValue(m: { unit: string }, v: number): string {
+  if (m.unit === "pct") return `${(v * 100).toFixed(0)}%`;
+  if (m.unit === "money") return fmtMoneyCompact(v);
+  if (m.unit === "days") return `${v.toFixed(1)} days`;
+  return fmtInt(v);
+}
+
+/** The account's own reading on each metric an industry playbook can ask for. Thresholds match the rest of the deck. */
+function industryReadings(d: {
+  jobs: JobDeepDive;
+  quotes: QuoteDeepDive;
+  invoices: InvoiceDeepDive;
+  accounts: AccountsDeepDive;
+  delivery: SharedDeckData["delivery"];
+  exec: ExecutionDeepDive;
+  calls: CallSummary | undefined;
+  workflowLive: number;
+}): Partial<Record<MetricKey, MetricReading | null>> {
+  const { jobs, quotes, invoices, accounts, delivery, exec, calls } = d;
+  const trend = momentum(jobs.monthly.map((m) => ({ label: m.label, value: m.created })), 3, 30);
+  const ot = delivery.onTime;
+  const answer = calls && calls.inbound ? calls.inboundAnswered / calls.inbound : null;
+  const topOrg = accounts.topOrganizationsByJobs[0];
+  return {
+    quoteAcceptance: quotes.sent >= 5 ? { value: pct0(quotes.conversionRate), note: `of ${fmtInt(quotes.sent)} sent quotes accepted (${fmtMoneyCompact(quotes.convertedValue)})`, tone: quotes.conversionRate < 0.3 ? "risk" : quotes.conversionRate >= 0.5 ? "win" : "watch" } : null,
+    staleQuotes: quotes.sent >= 5 ? { value: fmtMoneyCompact(quotes.staleOpen.value), note: `${fmtInt(quotes.staleOpen.count)} quotes open 30+ days`, tone: quotes.staleOpen.count >= 10 ? "opportunity" : "watch" } : null,
+    callAnswerRate: answer != null ? { value: pct0(answer), note: `of ${fmtInt(calls!.inbound)} inbound calls answered`, tone: answer < 0.8 ? "risk" : answer >= 0.9 ? "win" : "watch" } : null,
+    missedCalls: calls && calls.inbound ? { value: fmtInt(calls.inboundMissed), note: `inbound calls missed or to voicemail (${pct0(calls.inboundMissed / calls.inbound)})`, tone: calls.inboundMissed >= 20 ? "opportunity" : "win" } : null,
+    onTime: ot ? { value: pct0(ot.onTime / ot.eligible), note: `of ${fmtInt(ot.eligible)} jobs completed by their scheduled end`, tone: ot.onTime / ot.eligible < 0.5 ? "risk" : ot.onTime / ot.eligible >= 0.85 ? "win" : "watch" } : null,
+    recurringShare: jobs.created
+      ? (() => {
+          // Maintenance-type work created one job at a time is the tell for a recurring-schedule opportunity.
+          const maint = jobs.categories.filter((c) => /maint|preventa|\bpm\b|recurr|service plan|clean/i.test(c.name)).reduce((s, c) => s + c.created, 0);
+          const maintShare = maint / jobs.created;
+          return {
+            value: pct0(jobs.recurringShare),
+            note: jobs.recurringShare < 0.1 && maintShare >= 0.2 ? `from recurring schedules — yet ${pct0(maintShare)} of jobs are maintenance work, created one by one` : "of jobs come from recurring schedules",
+            tone: jobs.recurringShare < 0.1 ? ("opportunity" as const) : jobs.recurringShare >= 0.4 ? ("win" as const) : ("watch" as const),
+          };
+        })()
+      : null,
+    collectionRate: invoices.invoiced ? { value: pct0(invoices.collected / invoices.invoiced), note: `of ${fmtMoneyCompact(invoices.invoiced)} invoiced is collected`, tone: invoices.collected / invoices.invoiced >= 0.9 ? "win" : invoices.collected / invoices.invoiced < 0.8 ? "risk" : "watch" } : null,
+    daysToPay: invoices.medianDaysToPay != null ? { value: `${invoices.medianDaysToPay.toFixed(0)} days`, note: "median from invoice to payment", tone: invoices.medianDaysToPay <= 15 ? "win" : invoices.medianDaysToPay > 45 ? "risk" : "watch" } : null,
+    onlinePayShare: invoices.paymentsTotal ? { value: pct0(invoices.onlineShare), note: `of ${fmtMoneyCompact(invoices.paymentsTotal)} received was paid online`, tone: invoices.onlineShare < 0.2 ? "opportunity" : invoices.onlineShare >= 0.5 ? "win" : "watch" } : null,
+    workflowHealth: exec.available
+      ? { value: `${pct0(1 - exec.failureRate)} success`, note: `of workflow runs that executed (${fmtInt(d.workflowLive)} live workflows)`, tone: exec.failureRate > 0.2 ? "risk" : exec.failureRate < 0.05 ? "win" : "watch" }
+      : d.workflowLive
+        ? { value: `${fmtInt(d.workflowLive)} live`, note: "workflows automating hand-offs", tone: "win" }
+        : { value: "None", note: "no live automations", tone: "opportunity" },
+    jobGrowth: trend?.change != null ? { value: `${trend.change >= 0 ? "+" : "−"}${pct0(Math.abs(trend.change))}`, note: `jobs created ${trend.recentLabel} vs ${trend.priorLabel}`, tone: trend.change >= 0.1 ? "win" : trend.change <= -0.1 ? "risk" : "watch" } : null,
+    repeatCustomers: accounts.customers.total >= 20 ? { value: pct0(accounts.customers.repeatShare), note: "of customers have booked more than one job", tone: accounts.customers.repeatShare < 0.2 ? "opportunity" : "watch" } : null,
+    cycleTime: jobs.medianDaysCreatedToComplete != null ? { value: `${jobs.medianDaysCreatedToComplete.toFixed(0)} days`, note: "median from job created to completed", tone: "watch" } : null,
+    backlog: delivery.unscheduledBacklog != null ? { value: fmtInt(delivery.unscheduledBacklog), note: "jobs waiting to be scheduled right now", tone: delivery.unscheduledBacklog > 50 ? "risk" : "watch" } : null,
+    organizations: topOrg && accounts.jobsWithOrganization ? { value: pct0(topOrg.jobs / accounts.jobsWithOrganization), note: `of organization jobs from ${topOrg.name}`, tone: topOrg.jobs / accounts.jobsWithOrganization > 0.4 ? "risk" : "watch" } : null,
+  };
 }

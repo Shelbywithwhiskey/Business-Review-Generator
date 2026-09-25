@@ -248,6 +248,35 @@ export async function generateRecommendation(sectionKey: string, rule: RuleMatch
 }
 
 // ---------------------------------------------------------------------------
+// Industry & journey narrative. The website text is framing only (what the
+// business does, how it describes itself); every number must come from `facts`
+// — validateNoInventedNumbers() checks against facts alone, not the website.
+// ---------------------------------------------------------------------------
+
+export async function generateStoryNarrative(
+  kind: "industry" | "journey",
+  facts: Record<string, unknown>,
+  website: WebsiteContext | null,
+  fallback: string
+): Promise<string> {
+  if (!aiEnabled()) return fallback;
+  const context = website ? `\nHow the business describes itself (framing only — never a source of numbers):\n${JSON.stringify({ title: website.title, description: website.description, excerpt: website.excerpt.slice(0, 1500) })}` : "";
+  const task =
+    kind === "industry"
+      ? "Write 2-3 sentences for a CSM presenting to this customer: what kind of business this is (from the context), and what its own numbers in FACTS say about how it's running on the dimensions that matter most in its trade. Plain, specific, no hype, no benchmarks."
+      : "Write 2-3 sentences telling the story of this customer's time on Zuper: how the operation looked in the early months versus now, using only the before/after figures in FACTS. Say 'since moving onto Zuper' or 'over their time on Zuper' — never claim Zuper caused the change. Mention one thing that got better and, if present, one thing to work on.";
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const text = await callGemini(SYSTEM_PROMPT, `${task}${context}\n\nFACTS:\n${JSON.stringify(facts, null, 2)}`, 350);
+      if (text && validateNoInventedNumbers(text, facts)) return text;
+    } catch {
+      // network/API error — retry once, then fall back
+    }
+  }
+  return fallback;
+}
+
+// ---------------------------------------------------------------------------
 // Business-aware recommendations for the "Recommended Priorities" slide.
 // Grounded in: (1) computeRecommendationSignals()'s deterministic signals —
 // the ONLY numbers the AI is allowed to use, (2) a curated Zuper product

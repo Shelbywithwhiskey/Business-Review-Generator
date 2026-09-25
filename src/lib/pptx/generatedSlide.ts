@@ -81,21 +81,93 @@ export class ShapeWriter {
     return { x: x + 120000, y: y + 420000, cx: cx - 240000, cy: cy - 520000 };
   }
 
-  /** Row of KPI tiles across the content width. */
-  kpis(y: number, tiles: { value: string; label: string; alert?: boolean }[], h = 820000) {
+  /** Row of KPI tiles across the content width. A tile with `spark` gets a small trend line under its label. */
+  kpis(y: number, tiles: { value: string; label: string; alert?: boolean; spark?: number[] }[], h = 820000) {
     const gap = 130000;
     const w = (CONTENT_W - gap * (tiles.length - 1)) / tiles.length;
     tiles.forEach((t, i) => {
       const x = CONTENT_X + i * (w + gap);
+      const spark = t.spark && t.spark.length >= 3 && t.spark.some((v) => v > 0);
+      if (!spark) {
+        this.rect(x, y, w, h, COLORS.white, { radius: 10000, border: COLORS.border });
+        this.text(x, y + 90000, w, 400000, run(t.value, { sz: 2200, color: t.alert ? COLORS.alert : COLORS.orange, bold: true }), { algn: "ctr", anchor: "ctr", wrap: "none" });
+        this.text(x + 80000, y + 500000, w - 160000, 280000, run(t.label, { sz: 900, color: COLORS.muted }), { algn: "ctr" });
+        return;
+      }
+      // Value + label on the left, trend on the right.
       this.rect(x, y, w, h, COLORS.white, { radius: 10000, border: COLORS.border });
-      this.text(x, y + 90000, w, 400000, run(t.value, { sz: 2200, color: t.alert ? COLORS.alert : COLORS.orange, bold: true }), {
-        algn: "ctr",
-        anchor: "ctr",
-        wrap: "none",
-      });
-      this.text(x + 80000, y + 500000, w - 160000, 280000, run(t.label, { sz: 900, color: COLORS.muted }), { algn: "ctr" });
+      this.text(x + 110000, y + 90000, w * 0.56, 400000, run(t.value, { sz: 2000, color: t.alert ? COLORS.alert : COLORS.orange, bold: true }), { anchor: "ctr", wrap: "none" });
+      this.text(x + 110000, y + 500000, w * 0.56, 280000, run(t.label, { sz: 850, color: COLORS.muted }));
+      this.chart(x + w * 0.6, y + 140000, w * 0.36, h - 280000, { kind: "spark", categories: t.spark!.map((_, k) => String(k)), series: [{ name: t.label, values: t.spark!, color: t.alert ? COLORS.alert : COLORS.orange }] });
     });
   }
+
+  /** Big headline figure with a caption — for "the one number" moments. */
+  hero(x: number, y: number, cx: number, value: string, caption: string, color = COLORS.orange, captionColor: string = COLORS.muted) {
+    this.text(x, y, cx, 560000, run(value, { sz: 3600, color, bold: true }), { wrap: "none" });
+    this.text(x, y + 580000, cx, 300000, run(caption, { sz: 1050, color: captionColor }));
+  }
+
+  /**
+   * Before → after row (dumbbell): gray dot = before, orange dot = now, on the row's own scale,
+   * with a Better/Worse chip. Status color carries meaning and always comes with an arrow + word.
+   */
+  dumbbell(x: number, y: number, cx: number, row: { label: string; before: number; after: number; beforeText: string; afterText: string; improved: boolean; delta: string }) {
+    const labelW = cx * 0.3;
+    const chipW = 1150000;
+    const trackX = x + labelW + 120000;
+    const trackW = cx - labelW - chipW - 400000;
+    const max = Math.max(row.before, row.after, 1e-9) * 1.1;
+    const px = (v: number) => trackX + (Math.max(v, 0) / max) * trackW;
+    this.text(x, y, labelW, 360000, run(row.label, { sz: 1050, color: COLORS.ink, bold: true }), { anchor: "ctr" });
+    this.rect(trackX, y + 165000, trackW, 30000, COLORS.track);
+    const a = px(row.before);
+    const b = px(row.after);
+    this.rect(Math.min(a, b), y + 160000, Math.max(Math.abs(b - a), 20000), 40000, row.improved ? "9BD39B" : "F1A9A0");
+    this.rect(a - 70000, y + 110000, 140000, 140000, "9CA3AF", { radius: 50000 });
+    this.rect(b - 80000, y + 100000, 160000, 160000, COLORS.orange, { radius: 50000 });
+    this.text(a - 450000, y - 60000, 900000, 180000, run(row.beforeText, { sz: 800, color: COLORS.muted }), { algn: "ctr", wrap: "none" });
+    this.text(b - 450000, y + 250000, 900000, 180000, run(row.afterText, { sz: 850, color: COLORS.ink, bold: true }), { algn: "ctr", wrap: "none" });
+    const chipX = x + cx - chipW;
+    this.rect(chipX, y + 70000, chipW, 220000, row.improved ? "E7F6E7" : "FBE9E7", { radius: 50000 });
+    this.text(chipX, y + 70000, chipW, 220000, run(`${row.improved ? "▲ Better" : "▼ Worse"} ${row.delta}`, { sz: 800, color: row.improved ? "0B7A0B" : COLORS.alert, bold: true }), { algn: "ctr", anchor: "ctr", wrap: "none" });
+  }
+
+  /** Horizontal milestone timeline: dots on a line, labels alternating above and below. */
+  timeline(x: number, y: number, cx: number, items: { date: string; label: string }[]) {
+    if (!items.length) return;
+    this.rect(x, y, cx, 30000, COLORS.orange);
+    const step = items.length > 1 ? cx / (items.length - 1) : 0;
+    items.forEach((it, i) => {
+      const px = items.length > 1 ? x + i * step : x + cx / 2;
+      this.rect(px - 90000, y - 75000, 180000, 180000, COLORS.white, { radius: 50000, border: COLORS.orange });
+      this.rect(px - 45000, y - 30000, 90000, 90000, COLORS.orange, { radius: 50000 });
+      const above = i % 2 === 0;
+      const w = Math.min(1700000, Math.max(step, 1300000));
+      const ty = above ? y - 620000 : y + 200000;
+      this.text(px - w / 2, ty, w, 200000, run(it.date, { sz: 900, color: COLORS.orange, bold: true }), { algn: "ctr", wrap: "none" });
+      this.text(px - w / 2, ty + 200000, w, 360000, run(it.label, { sz: 950, color: COLORS.white }), { algn: "ctr" });
+    });
+  }
+
+  /** Stepped flow (funnel): each stage a bar scaled to its value, with the step-to-step ratio between. */
+  funnel(x: number, y: number, cx: number, cy: number, stages: { label: string; value: number; display: string; sub?: string }[]) {
+    if (!stages.length) return;
+    const max = Math.max(...stages.map((s) => s.value), 1);
+    const rowH = cy / stages.length;
+    const labelW = cx * 0.28;
+    const barMaxW = cx - labelW - 1500000;
+    stages.forEach((s, i) => {
+      const ry = y + i * rowH;
+      const bw = Math.max((s.value / max) * barMaxW, 80000);
+      this.text(x, ry, labelW, rowH * 0.62, run(s.label, { sz: 1100, color: COLORS.ink, bold: true }), { anchor: "ctr" });
+      const shade = ["FD5000", "FD6F2E", "FE8C57", "FEA981", "FFC6AB"][Math.min(i, 4)];
+      this.rect(x + labelW, ry + rowH * 0.1, bw, rowH * 0.42, shade, { radius: 12000 });
+      this.text(x + labelW + bw + 100000, ry, 1400000, rowH * 0.62, run(s.display, { sz: 1200, color: COLORS.ink, bold: true }), { anchor: "ctr", wrap: "none" });
+      if (s.sub) this.text(x + labelW, ry + rowH * 0.55, barMaxW, rowH * 0.4, run(s.sub, { sz: 850, color: COLORS.muted }), { wrap: "none" });
+    });
+  }
+
 
   /** Centered muted message inside a box — the explicit "no data" state, never an empty chart. */
   empty(box: { x: number; y: number; cx: number; cy: number }, message: string) {

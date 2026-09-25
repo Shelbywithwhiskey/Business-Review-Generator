@@ -261,22 +261,39 @@ async function fetchModule(mod: CatalogModule, client: ZuperClient, range: DateR
       if (mod.countOnly) {
         const res = await client.getRaw(mod.path, { ...params, page: 1, count: 1, limit: 1 });
         const { total, items } = extractList(res);
-        return { items: [] as Record<string, unknown>[], total: total ?? items.length, truncated: false };
+        return { items: [] as Record<string, unknown>[], total: total ?? items.length, truncated: false, partialError: null as string | null };
       }
       const max = mod.maxRecords ?? DEFAULT_MAX;
       const items: Record<string, unknown>[] = [];
       let total: number | null = null;
+      const fetchPage = (page: number) =>
+        mod.method === "POST"
+          ? client.postRaw(mod.path, mod.body?.(range, page, PAGE_SIZE) ?? { page, limit: PAGE_SIZE })
+          : client.getRaw(mod.path, { ...params, page, count: PAGE_SIZE, limit: PAGE_SIZE });
       for (let page = 1; ; page++) {
-        const res =
-          mod.method === "POST"
-            ? await client.postRaw(mod.path, mod.body?.(range, page, PAGE_SIZE) ?? { page, limit: PAGE_SIZE })
-            : await client.getRaw(mod.path, { ...params, page, count: PAGE_SIZE, limit: PAGE_SIZE });
+        let res: unknown;
+        try {
+          res = await fetchPage(page);
+        } catch (err) {
+          // Deep pages sometimes 5xx on large accounts (seen on Connect calls): retry once, then keep
+          // what already arrived rather than discarding the whole module.
+          const serverSide = !(err instanceof ZuperApiError) || err.status >= 500;
+          if (!serverSide) throw err;
+          try {
+            await new Promise((r) => setTimeout(r, 1500));
+            res = await fetchPage(page);
+          } catch (retryErr) {
+            if (!items.length) throw retryErr;
+            const why = retryErr instanceof ZuperApiError ? `HTTP ${retryErr.status}` : "error";
+            return { items, total, truncated: true, partialError: `Stopped at page ${page} (${why}) — kept the first ${items.length.toLocaleString("en-US")} records` };
+          }
+        }
         const list = extractList(res);
         total ??= list.total;
         items.push(...list.items);
         const done = list.items.length < PAGE_SIZE || (list.totalPages != null && page >= list.totalPages) || (total != null && items.length >= total);
-        if (done) return { items, total, truncated: false };
-        if (items.length >= max || Date.now() > deadline) return { items: items.slice(0, max), total, truncated: true };
+        if (done) return { items, total, truncated: false, partialError: null as string | null };
+        if (items.length >= max || Date.now() > deadline) return { items: items.slice(0, max), total, truncated: true, partialError: null as string | null };
       }
     } catch (err) {
       lastErr = err;
@@ -315,7 +332,7 @@ export async function runCatalogSync(
     const client = clients[mod.host ?? "main"];
     const endpoint = `${mod.method ?? "GET"} ${mod.host === "connect" ? "connect:" : ""}/${mod.path}`;
     try {
-      const { items, total, truncated } = await fetchModule(mod, client, range, deadline - 25_000);
+      const { items, total, truncated, partialError } = await fetchModule(mod, client, range, deadline - 25_000);
       const compacted: { uid: string; data: CompactRecord; createdAt: Date | null }[] = items.map((raw, idx) => ({
         uid: pickUid(raw, mod.uidKeys, `row-${idx}`),
         data: compactRecord(raw),
@@ -339,7 +356,7 @@ export async function runCatalogSync(
         totalRecords: total,
         truncated,
         fieldStats: mod.countOnly ? null : fieldStats(unique.map((c) => c.data)),
-        message: truncated ? `Capped at ${unique.length.toLocaleString("en-US")} of ${total?.toLocaleString("en-US") ?? "more"} records` : null,
+        message: partialError ?? (truncated ? `Capped at ${unique.length.toLocaleString("en-US")} of ${total?.toLocaleString("en-US") ?? "more"} records` : null),
       });
       results.push({ key: mod.key, status: count > 0 ? "ok" : "empty", recordCount: count });
     } catch (err) {
