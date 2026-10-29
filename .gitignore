@@ -45,3 +45,5 @@ next-env.d.ts
 
 # throwaway local probes/test scripts — may reference real customer data, never commit
 .scratch-*
+
+.env*
