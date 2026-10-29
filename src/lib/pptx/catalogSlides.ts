@@ -685,9 +685,9 @@ export function coverageSlides(ctx: Ctx, rows: CoverageRow[]): ShapeWriter[] {
     if (p === 0) {
       const sx = CONTENT_X + tableW + 150000;
       const sw = CONTENT_W - tableW - 150000;
+      // Modules that returned 0 records are left off; only what has data, or needs action, is listed.
       const groups: [string, string[], string][] = [
         ["NOT ENABLED / NO ACCESS", byStatus("not_available"), COLORS.alert],
-        ["IN THE API, NO RECORDS", byStatus("empty"), COLORS.muted],
         ["NOT EXPOSED BY THE API", byStatus("not_in_api"), COLORS.muted],
         ["SYNC ERRORS", byStatus("error"), COLORS.alert],
       ];

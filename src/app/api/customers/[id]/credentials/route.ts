@@ -8,7 +8,8 @@ import { ZuperClient, discoverZuperConfig } from "@/lib/zuper/client";
 // checks that a key the user typed in actually authenticates.
 
 const schema = z.object({
-  apiKey: z.string().min(1),
+  // Trimmed: a key pasted with a trailing space or newline is rejected by Zuper with a 401.
+  apiKey: z.string().trim().min(1),
   // Optional manual override; normally the base URL is auto-discovered from
   // the customer's zuperAccountId (their Zuper company login name).
   baseUrl: z.string().url().optional(),
@@ -43,14 +44,15 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     }
   }
 
-  const ok = await new ZuperClient(parsed.data.apiKey, baseUrl).testConnection();
+  const failure = await new ZuperClient(parsed.data.apiKey, baseUrl).testConnection();
+  const ok = failure === null;
   const connection = await prisma.apiCredential.upsert({
     where: { customerId },
     create: { customerId, baseUrl, workflowBaseUrl, lastVerifiedAt: ok ? new Date() : null },
     update: { baseUrl, workflowBaseUrl, ...(ok ? { lastVerifiedAt: new Date() } : {}) },
   });
 
-  return NextResponse.json({ ok, baseUrl: connection.baseUrl, workflowBaseUrl: connection.workflowBaseUrl });
+  return NextResponse.json({ ok, failure, baseUrl: connection.baseUrl, workflowBaseUrl: connection.workflowBaseUrl });
 }
 
 export async function GET(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {

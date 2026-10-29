@@ -410,5 +410,6 @@ export async function upsertCoverage(
     where: { customerId_module: { customerId, module: c.module } },
     create: { customerId, module: c.module, ...data },
     update: data,
+    select: { id: true }, // don't send the fieldStats JSON back
   });
 }

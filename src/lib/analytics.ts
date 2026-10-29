@@ -178,8 +178,10 @@ export interface PeriodMetrics {
 }
 
 export async function computeJobMetrics(customerId: string, range: DateRange): Promise<JobMetrics> {
+  // Only the fields used below — whole rows carry the large `extra` JSON (tens of MB on big accounts).
   const jobs = await prisma.job.findMany({
     where: { customerId, createdAt: { gte: range.start, lte: range.end } },
+    select: { serviceType: true, jobValue: true, rawStatusName: true, status: true },
   });
 
   const byServiceType: Record<string, number> = {};
@@ -584,7 +586,10 @@ export async function computeLedgerMetrics(customerId: string): Promise<LedgerMe
 /** Recomputes per-technician job rollups from the Job table for a period. Called after jobs+teams sync. */
 export async function computeTechnicianRollups(customerId: string, range: DateRange): Promise<void> {
   const [jobs, technicians] = await Promise.all([
-    prisma.job.findMany({ where: { customerId, createdAt: { gte: range.start, lte: range.end } } }),
+    prisma.job.findMany({
+      where: { customerId, createdAt: { gte: range.start, lte: range.end } },
+      select: { technicianId: true, status: true, jobValue: true },
+    }),
     prisma.technician.findMany({ where: { customerId, periodStart: range.start, periodEnd: range.end } }),
   ]);
 

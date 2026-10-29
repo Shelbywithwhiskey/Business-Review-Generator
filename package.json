@@ -12,6 +12,7 @@
   "dependencies": {
     "@google/genai": "^2.24.0",
     "@prisma/client": "6.19.3",
+    "@vercel/blob": "^2.8.1",
     "clsx": "^2.1.1",
     "jose": "^6.2.12",
     "jszip": "^3.10.2",

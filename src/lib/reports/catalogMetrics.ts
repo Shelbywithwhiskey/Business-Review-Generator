@@ -1,3 +1,4 @@
+import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { CATALOG, NOT_IN_API, type CatalogModule, type ProductArea } from "@/lib/zuper/catalog";
 import type { CompactRecord } from "@/lib/zuper/compact";
@@ -84,6 +85,23 @@ const DIM_KEY = /(status|type|stage|priority|category|direction|source|mode|role
 const DIM_EXCLUDE = /(uid|_id$|color|colour|date|time|_at$|url|email|phone|description|note|address)/i;
 const AMOUNT_KEY = /(total|amount|value|price|cost|charge|earned|balance)/i;
 const AMOUNT_EXCLUDE = /(count|qty|quantity|percent|rate|no_of|length|_uid|tax_rate|discount_rate)/i;
+const NAME_KEY = /(_name|_title|^name|^title)$/i;
+const AI_KEY = /(^|_|\.)(ai|agent|bot|virtual|csr)(_|\.|$)/i;
+
+/** Every record key the analysis in this file can read: the detection patterns above plus the fields
+ * named in moduleHighlights / summarizeCalls / summarizeTimelogs / computePortalAndPay. Records are
+ * trimmed to these keys in Postgres (loadRecords), so the rest of each record never leaves the
+ * database. A field read below that matches none of these must be added here. */
+const RECORD_KEY_PATTERN = [
+  DIM_KEY.source,
+  AMOUNT_KEY.source,
+  NAME_KEY.source,
+  AI_KEY.source,
+  /^customer\.|^owned_by_customer|created_by|channel/.source,
+  /^(is_active|is_expired|end_date|warranty_expiry_date|is_portal_enabled|is_recorded|is_optimized|duration|time_spent|clock_in_time|clock_out_time)$/.source,
+  /^user\.(first_name|last_name|user_uid)$/.source,
+  /^call_metric\.(answered_at|time_to_answer)$/.source,
+].join("|");
 
 function detectBreakdowns(rows: CompactRecord[], max = 2): Breakdown[] {
   if (!rows.length) return [];
@@ -199,7 +217,7 @@ export function summarizeCalls(rows: { data: CompactRecord; at: Date | null }[],
     avgAnswerSec: answerSecs.length ? answerSecs.reduce((s, v) => s + v, 0) / answerSecs.length : null,
     avgTalkSec: talk.length ? talk.reduce((s, v) => s + v, 0) / talk.length : null,
     recordedShare: recorded.length ? recorded.filter((r) => truthy(r.data.is_recorded)).length / recorded.length : null,
-    ai: period.filter((r) => Object.entries(r.data).some(([k, v]) => /(^|_|\.)(ai|agent|bot|virtual|csr)(_|\.|$)/i.test(k) && (v === true || v === "true"))).length,
+    ai: period.filter((r) => Object.entries(r.data).some(([k, v]) => AI_KEY.test(k) && (v === true || v === "true"))).length,
     monthly: monthsOf(range, period.map((r) => r.at!)),
   };
 }
@@ -249,7 +267,7 @@ function detectSingleStatus(rows: CompactRecord[]): { field: string; value: stri
 export function recordNames(rows: CompactRecord[], max = 5): string[] {
   const names: string[] = [];
   for (const r of rows) {
-    const key = Object.keys(r).find((k) => !k.includes(".") && /(_name|_title|^name|^title)$/i.test(k) && typeof r[k] === "string" && r[k]);
+    const key = Object.keys(r).find((k) => !k.includes(".") && NAME_KEY.test(k) && typeof r[k] === "string" && r[k]);
     if (key) names.push(String(r[key]));
     if (names.length >= max) break;
   }
@@ -397,17 +415,45 @@ export function analyzeModule(mod: CatalogModule, rows: { data: CompactRecord; a
   };
 }
 
+/** Catalog module keys that returned at least one record on the last sync. */
+async function modulesWithData(customerId: string, modules: string[]): Promise<Set<string>> {
+  const rows = await prisma.moduleCoverage.findMany({ where: { customerId, module: { in: modules }, status: "ok", recordCount: { gt: 0 } }, select: { module: true } });
+  return new Set(rows.map((r) => r.module));
+}
+
+/** Stored records of one module, or none without a database read when the module has no data. */
+function recordsIf<T>(has: boolean, read: () => Promise<T[]>): Promise<T[]> {
+  return has ? read() : Promise.resolve([]);
+}
+
+/** One module's records with `data` trimmed in Postgres to the keys in RECORD_KEY_PATTERN. Reading
+ * whole records for every module was the bulk of a report export's database transfer. A record with
+ * none of those keys comes back as {}; a non-object `data` comes back unchanged. */
+function loadRecords(customerId: string, module: string): Promise<{ data: CompactRecord; recordCreatedAt: Date | null }[]> {
+  return prisma.$queryRaw`
+    SELECT
+      CASE WHEN jsonb_typeof(r.data) = 'object' THEN COALESCE(
+        (SELECT jsonb_object_agg(e.key, e.value) FROM jsonb_each(r.data) e WHERE e.key ~* ${RECORD_KEY_PATTERN}),
+        '{}'::jsonb)
+      ELSE r.data END AS data,
+      r."recordCreatedAt"
+    FROM "ZuperRecord" r
+    WHERE r."customerId" = ${customerId} AND r.module = ${module}`;
+}
+
 /** One analysis per catalog module that returned data on the last sync. */
 export async function computeCatalogAnalyses(customerId: string, range: DateRange): Promise<ModuleAnalysis[]> {
   const coverage = await loadCoverage(customerId);
-  const out: ModuleAnalysis[] = [];
-  for (const mod of CATALOG) {
-    const cov = coverage.get(mod.key);
-    if (!cov || cov.status !== "ok") continue;
-    const records = mod.countOnly ? [] : await prisma.zuperRecord.findMany({ where: { customerId, module: mod.key }, select: { data: true, recordCreatedAt: true } });
-    out.push(analyzeModule(mod, records.map((r) => ({ data: r.data as CompactRecord, at: r.recordCreatedAt })), range, cov));
-  }
-  return out;
+  // Fetched in parallel: one round trip per module in sequence added up to most of a minute on large accounts.
+  const analyses = await Promise.all(
+    CATALOG.map(async (mod) => {
+      const cov = coverage.get(mod.key);
+      if (!cov || cov.status !== "ok" || cov.recordCount === 0) return null;
+      const records = mod.countOnly ? [] : await loadRecords(customerId, mod.key);
+      return analyzeModule(mod, records.map((r) => ({ data: r.data, at: r.recordCreatedAt })), range, cov);
+    })
+  );
+  return analyses.filter((a): a is ModuleAnalysis => a !== null);
 }
 
 // ---- Jobs: service delivery (from Job.extra + catalog time logs) -------------------------------
@@ -432,14 +478,45 @@ export interface JobServiceDelivery {
   timeOnSite: TimelogSummary | null;
 }
 
+/** The Job.extra keys read below: exact names, plus any key matching EXTRA_KEY_PATTERN. */
+const EXTRA_KEYS = [
+  "scheduled_end_time",
+  "due_date",
+  "scheduled_end_date",
+  "invoice.invoice_uid",
+  "invoice.length",
+  "invoices.length",
+  "invoice_uid",
+  "assigned_to.length",
+];
+const EXTRA_KEY_PATTERN = "rating|job_type|work_type|source";
+
+type ServiceDeliveryJob = {
+  zuperJobId: string;
+  status: string;
+  serviceType: string | null;
+  priority: string | null;
+  completedAt: Date | null;
+  scheduledAt: Date | null;
+  extra: Prisma.JsonValue;
+};
+
 export async function computeJobServiceDelivery(customerId: string, range: DateRange): Promise<JobServiceDelivery> {
+  const withData = await modulesWithData(customerId, ["job_timelogs"]);
   const [jobs, timelogs, unscheduled] = await Promise.all([
-    prisma.job.findMany({
-      where: { customerId, createdAt: { gte: range.start, lte: range.end } },
-      select: { zuperJobId: true, status: true, serviceType: true, priority: true, completedAt: true, scheduledAt: true, extra: true },
-    }),
+    // Job.extra is the whole compacted job (tens of MB on large accounts); only the keys used here are
+    // pulled. An object with none of them comes back as {} so `extraSynced` still sees it as synced.
+    prisma.$queryRaw<ServiceDeliveryJob[]>`
+      SELECT j."zuperJobId", j.status, j."serviceType", j.priority, j."completedAt", j."scheduledAt",
+        CASE WHEN jsonb_typeof(j.extra) = 'object' THEN COALESCE(
+          (SELECT jsonb_object_agg(e.key, e.value) FROM jsonb_each(j.extra) e
+            WHERE e.key IN (${Prisma.join(EXTRA_KEYS)}) OR e.key ~* ${EXTRA_KEY_PATTERN}),
+          '{}'::jsonb)
+        ELSE j.extra END AS extra
+      FROM "Job" j
+      WHERE j."customerId" = ${customerId} AND j."createdAt" >= ${range.start} AND j."createdAt" <= ${range.end}`,
     // Filtered by clock-in date in summarizeTimelogs (created_at is the clock-out time).
-    prisma.zuperRecord.findMany({ where: { customerId, module: "job_timelogs" }, select: { data: true } }),
+    recordsIf(withData.has("job_timelogs"), () => loadRecords(customerId, "job_timelogs")),
     prisma.moduleCoverage.findUnique({ where: { customerId_module: { customerId, module: "unscheduled_jobs" } } }),
   ]);
   const extras = jobs.map((j) => (j.extra ?? {}) as CompactRecord);
@@ -553,11 +630,12 @@ export interface PortalAndPay {
 }
 
 export async function computePortalAndPay(customerId: string, range: DateRange): Promise<PortalAndPay> {
+  const withData = await modulesWithData(customerId, ["organizations_portal", "requests", "payment_requests"]);
   const [payments, orgs, requests, payReqs, coverageCount] = await Promise.all([
     prisma.payment.findMany({ where: { customerId, paidAt: { gte: range.start, lte: range.end } }, select: { amount: true, source: true, paymentModeType: true } }),
-    prisma.zuperRecord.findMany({ where: { customerId, module: "organizations_portal" }, select: { data: true } }),
-    prisma.zuperRecord.findMany({ where: { customerId, module: "requests" }, select: { data: true } }),
-    prisma.zuperRecord.findMany({ where: { customerId, module: "payment_requests" }, select: { data: true, recordCreatedAt: true } }),
+    recordsIf(withData.has("organizations_portal"), () => loadRecords(customerId, "organizations_portal")),
+    recordsIf(withData.has("requests"), () => loadRecords(customerId, "requests")),
+    recordsIf(withData.has("payment_requests"), () => loadRecords(customerId, "payment_requests")),
     prisma.moduleCoverage.count({ where: { customerId, module: "payment_requests" } }),
   ]);
   const sources = new Map<string, { count: number; amount: number }>();

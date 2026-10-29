@@ -109,7 +109,10 @@ export class ZuperClient {
       } catch {
         // non-JSON error body (e.g. an HTML 404 page from a wrong path) — keep raw text
       }
-      throw new ZuperApiError(`Zuper API ${res.status} on ${path}`, res.status, body);
+      // Zuper's own reason (e.g. "Invalid API key", a missing permission) — never contains the key.
+      const reason = typeof body === "object" && body && "message" in body && typeof body.message === "string" ? body.message : null;
+      const where = path.split("?")[0].replace(/^\//, "");
+      throw new ZuperApiError(`Zuper API ${res.status} on ${where}${reason ? `: ${reason.slice(0, 200)}` : ""}`, res.status, body);
     }
 
     try {
@@ -177,12 +180,15 @@ export class ZuperClient {
     return res.data;
   }
 
-  async testConnection(): Promise<boolean> {
+  /** Checks the key against /organization and /jobs — a key can read the former yet be refused the
+   * latter, and jobs is the first thing a sync pulls. Returns null when both work, else the failure. */
+  async testConnection(): Promise<string | null> {
     try {
       await this.request("/organization", {});
-      return true;
-    } catch {
-      return false;
+      await this.request("/jobs", { page: 1, count: 1 });
+      return null;
+    } catch (err) {
+      return err instanceof Error ? err.message : String(err);
     }
   }
 }

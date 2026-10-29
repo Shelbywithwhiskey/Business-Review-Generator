@@ -1,17 +1,30 @@
 import Link from "next/link";
 import { prisma } from "@/lib/db";
 import { Nav } from "@/components/Nav";
+import { DatabaseUnavailable } from "@/components/DatabaseUnavailable";
+import { isDatabaseUnavailable } from "@/lib/dbStatus";
 
 export const dynamic = "force-dynamic";
 
-export default async function DashboardPage() {
-  const customers = await prisma.customer.findMany({
+function loadCustomers() {
+  return prisma.customer.findMany({
     orderBy: { createdAt: "desc" },
     include: {
       credential: { select: { lastVerifiedAt: true } },
-      syncRuns: { orderBy: { createdAt: "desc" }, take: 1 },
+      syncRuns: { orderBy: { createdAt: "desc" }, take: 1, select: { status: true } },
     },
   });
+}
+
+export default async function DashboardPage() {
+  let customers: Awaited<ReturnType<typeof loadCustomers>> | null = null;
+  try {
+    customers = await loadCustomers();
+  } catch (err) {
+    // A down database gets a plain explanation; any other error still goes to error.tsx.
+    if (!isDatabaseUnavailable(err)) throw err;
+    console.error("Dashboard: database unavailable", err);
+  }
 
   return (
     <div>
@@ -19,7 +32,9 @@ export default async function DashboardPage() {
       <main className="mx-auto max-w-5xl px-6 py-8">
         <h1 className="mb-6 text-lg font-semibold">Customers</h1>
 
-        {customers.length === 0 ? (
+        {customers === null ? (
+          <DatabaseUnavailable />
+        ) : customers.length === 0 ? (
           <div className="rounded-lg border border-dashed border-neutral-300 p-10 text-center text-neutral-500 dark:border-neutral-700">
             No customers yet.{" "}
             <Link href="/customers/new" className="underline">

@@ -1076,19 +1076,30 @@ export async function insertModuleSlides(zip: JSZip, input: ModuleDeckInput): Pr
   // Template anchors: 12 = "Business KPI - Highlights" divider, 14 = Job Performance,
   // 15 = Daily Operations, 17 = Quote quarterly, 18 = Invoice quarterly.
   const scope = await insertGeneratedSlide(zip, "ppt/slides/slide12.xml", scopeSlide(ctx, scopeRows(jobs, input.usage, accounts, team, projects, quotes, invoices, input.workflowSummary, exec)));
-  const volume = await insertGeneratedSlide(zip, "ppt/slides/slide14.xml", jobsVolumeSlide(ctx, jobs));
-  const lifecycle = await insertGeneratedSlide(zip, volume, jobsLifecycleSlide(ctx, jobs));
-  await insertChain(zip, lifecycle, [jobServiceSlide(cctx, delivery), timeOnSiteSlide(cctx, delivery)]);
-  let after = await insertGeneratedSlide(zip, "ppt/slides/slide15.xml", accountsSlide(ctx, accounts));
+  // Deep-dive slides are only added for areas with records; an all-zero slide is left out of the deck.
   const tl = delivery.timeOnSite;
-  after = await insertGeneratedSlide(zip, after, workforceSlide(ctx, team, jobs.created, tl ? { entries: tl.entries, hours: tl.hours, people: tl.people.length } : null));
-  if (projects.total > 0) await insertGeneratedSlide(zip, after, projectsSlide(ctx, projects));
-  await insertGeneratedSlide(zip, "ppt/slides/slide17.xml", quotesSlide(ctx, quotes));
-  const invoiceDeepDive = await insertGeneratedSlide(zip, "ppt/slides/slide18.xml", invoicesSlide(ctx, invoices));
-  await insertGeneratedSlide(zip, invoiceDeepDive, portalPaySlide(cctx, portalPay));
+  await insertChain(zip, "ppt/slides/slide14.xml", [
+    jobs.created > 0 ? jobsVolumeSlide(ctx, jobs) : null,
+    jobs.created > 0 ? jobsLifecycleSlide(ctx, jobs) : null,
+    delivery.jobsInPeriod > 0 ? jobServiceSlide(cctx, delivery) : null,
+    timeOnSiteSlide(cctx, delivery),
+  ]);
+  const hasAccounts = accounts.customers.total + accounts.organizations.total + accounts.properties.total > 0;
+  const hasTeam = team.teamSize > 0 || team.jobsAssigned > 0 || team.timesheetEvents > 0;
+  await insertChain(zip, "ppt/slides/slide15.xml", [
+    hasAccounts ? accountsSlide(ctx, accounts) : null,
+    hasTeam ? workforceSlide(ctx, team, jobs.created, tl ? { entries: tl.entries, hours: tl.hours, people: tl.people.length } : null) : null,
+    projects.total > 0 ? projectsSlide(ctx, projects) : null,
+  ]);
+  if (quotes.count > 0) await insertGeneratedSlide(zip, "ppt/slides/slide17.xml", quotesSlide(ctx, quotes));
+  const hasPortalPay = !!portalPay.portalOrgs || !!portalPay.paymentRequests || portalPay.paymentSources.length > 0 || portalPay.online.total > 0;
+  await insertChain(zip, "ppt/slides/slide18.xml", [
+    invoices.count > 0 || invoices.paymentsTotal > 0 ? invoicesSlide(ctx, invoices) : null,
+    hasPortalPay ? portalPaySlide(cctx, portalPay) : null,
+  ]);
 
   // Adoption section: executions, Zuper Connect, then every other module with data, then coverage.
-  const executions = await insertGeneratedSlide(zip, input.automationSlidePath, executionsSlide(ctx, exec));
+  const executions = await insertChain(zip, input.automationSlidePath, [exec.available && exec.total > 0 ? executionsSlide(ctx, exec) : null]);
   const byKey = new Map(catalog.map((m) => [m.key, m]));
   const SHOWN_ELSEWHERE = new Set(["job_timelogs", "unscheduled_jobs", "organizations_portal", "connect_calls", "connect_sms", "payment_requests"]);
   const quotesTotal = quotes.count;
@@ -1096,7 +1107,7 @@ export async function insertModuleSlides(zip: JSZip, input: ModuleDeckInput): Pr
   const own = catalog.filter((m) => !SHOWN_ELSEWHERE.has(m.key) && !SETUP_MODULES.has(m.key));
   const setup = catalog.filter((m) => SETUP_MODULES.has(m.key));
   await insertChain(zip, executions, [
-    connectSlide(cctx, byKey.get("connect_calls"), byKey.get("connect_sms"), coverage),
+    byKey.has("connect_calls") || byKey.has("connect_sms") ? connectSlide(cctx, byKey.get("connect_calls"), byKey.get("connect_sms"), coverage) : null,
     ...own.map((m) => moduleSlide(cctx, m, { quotesInPeriod: quotesTotal, jobsInPeriod: jobsAllTime })),
     setupSlide(cctx, setup),
     ...coverageSlides(cctx, coverage),

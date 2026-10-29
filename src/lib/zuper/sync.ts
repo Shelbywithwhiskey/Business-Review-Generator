@@ -102,6 +102,9 @@ export async function runSync(
               where: { customerId_zuperJobId: { customerId, zuperJobId: job.zuperJobId } },
               create: { ...data, customerId, syncRunId: syncRun.id },
               update: { ...data, syncRunId: syncRun.id },
+              // Upserts return the whole row by default — for jobs that includes the large `extra` JSON,
+              // sent back from the database for nothing. Every upsert below only selects the id.
+              select: { id: true },
             });
           })
         );
@@ -133,6 +136,7 @@ export async function runSync(
               where: { customerId_zuperInvoiceId: { customerId, zuperInvoiceId: invoice.zuperInvoiceId } },
               create: { ...invoice, customerId, syncRunId: syncRun.id },
               update: { ...invoice, syncRunId: syncRun.id },
+              select: { id: true },
             })
           )
         );
@@ -147,6 +151,7 @@ export async function runSync(
               where: { customerId_zuperQuoteId: { customerId, zuperQuoteId: quote.zuperQuoteId } },
               create: { ...quote, customerId, syncRunId: syncRun.id },
               update: { ...quote, syncRunId: syncRun.id },
+              select: { id: true },
             })
           )
         );
@@ -177,6 +182,7 @@ export async function runSync(
                 lastLoginAt: tech.lastLoginAt,
                 syncRunId: syncRun.id,
               },
+              select: { id: true },
             })
           )
         );
@@ -191,6 +197,7 @@ export async function runSync(
               where: { customerId_zuperPaymentId: { customerId, zuperPaymentId: payment.zuperPaymentId } },
               create: { ...payment, customerId, syncRunId: syncRun.id },
               update: { ...payment, syncRunId: syncRun.id },
+              select: { id: true },
             })
           )
         );
@@ -205,6 +212,7 @@ export async function runSync(
               where: { customerId_zuperProductId: { customerId, zuperProductId: product.zuperProductId } },
               create: { ...product, customerId, syncRunId: syncRun.id },
               update: { ...product, syncRunId: syncRun.id },
+              select: { id: true },
             })
           )
         );
@@ -219,6 +227,7 @@ export async function runSync(
               where: { customerId_zuperExpenseId: { customerId, zuperExpenseId: expense.zuperExpenseId } },
               create: { ...expense, customerId, syncRunId: syncRun.id },
               update: { ...expense, syncRunId: syncRun.id },
+              select: { id: true },
             })
           )
         );
@@ -233,6 +242,7 @@ export async function runSync(
               where: { customerId_zuperTimesheetId: { customerId, zuperTimesheetId: event.zuperTimesheetId } },
               create: { ...event, customerId, syncRunId: syncRun.id },
               update: { ...event, syncRunId: syncRun.id },
+              select: { id: true },
             })
           )
         );
@@ -247,6 +257,7 @@ export async function runSync(
               where: { customerId_zuperCustomerId: { customerId, zuperCustomerId: endCustomer.zuperCustomerId } },
               create: { ...endCustomer, customerId, syncRunId: syncRun.id },
               update: { ...endCustomer, syncRunId: syncRun.id },
+              select: { id: true },
             })
           )
         );
@@ -261,6 +272,7 @@ export async function runSync(
               where: { customerId_zuperOrganizationId: { customerId, zuperOrganizationId: org.zuperOrganizationId } },
               create: { ...org, customerId, syncRunId: syncRun.id },
               update: { ...org, syncRunId: syncRun.id },
+              select: { id: true },
             })
           )
         );
@@ -275,6 +287,7 @@ export async function runSync(
               where: { customerId_zuperPropertyId: { customerId, zuperPropertyId: property.zuperPropertyId } },
               create: { ...property, customerId, syncRunId: syncRun.id },
               update: { ...property, syncRunId: syncRun.id },
+              select: { id: true },
             })
           )
         );
@@ -289,6 +302,7 @@ export async function runSync(
               where: { customerId_zuperProjectId: { customerId, zuperProjectId: project.zuperProjectId } },
               create: { ...project, customerId, syncRunId: syncRun.id },
               update: { ...project, syncRunId: syncRun.id },
+              select: { id: true },
             })
           )
         );
@@ -306,6 +320,7 @@ export async function runSync(
               where: { customerId_zuperWorkflowId: { customerId, zuperWorkflowId: workflow.zuperWorkflowId } },
               create: { ...workflow, customerId, syncRunId: syncRun.id },
               update: { ...workflow, syncRunId: syncRun.id },
+              select: { id: true },
             })
           )
         );
@@ -335,6 +350,7 @@ export async function runSync(
           where: { customerId_periodStart_periodEnd: { customerId, periodStart: range.start, periodEnd: range.end } },
           create: { ...data, customerId, periodStart: range.start, periodEnd: range.end },
           update: data,
+          select: { id: true },
         });
       });
     }

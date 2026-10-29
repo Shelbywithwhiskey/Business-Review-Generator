@@ -8,7 +8,7 @@ export const maxDuration = 300;
 
 const schema = z.object({
   // Entered by hand for every sync and used only for this request — never stored.
-  apiKey: z.string().min(1),
+  apiKey: z.string().trim().min(1),
   periodStart: z.string(),
   periodEnd: z.string(),
   startIndex: z.number().int().min(0).optional(),

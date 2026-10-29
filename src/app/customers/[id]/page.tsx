@@ -87,7 +87,7 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
       setCredentialError(data.error ?? "Connection test failed");
       return;
     }
-    setVerifyResult(data.ok ? "Connection verified" : "Could not connect — check the API key");
+    setVerifyResult(data.ok ? "Connection verified" : `Could not connect — ${data.failure ?? "check the API key"}`);
     await loadCustomer();
   }
 

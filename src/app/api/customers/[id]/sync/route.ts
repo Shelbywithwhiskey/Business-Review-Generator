@@ -7,7 +7,8 @@ export const maxDuration = 300; // Vercel Fluid Compute allows longer durations;
 
 const schema = z.object({
   // Entered by hand for every sync and used only for this request — never stored.
-  apiKey: z.string().min(1),
+  // Trimmed: a key pasted with a trailing space or newline is rejected by Zuper with a 401.
+  apiKey: z.string().trim().min(1),
   periodStart: z.string(),
   periodEnd: z.string(),
   modules: z
