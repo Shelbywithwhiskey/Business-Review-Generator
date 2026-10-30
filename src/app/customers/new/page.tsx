@@ -70,7 +70,7 @@ export default function NewCustomerPage() {
             </p>
           </div>
           <div>
-            <label className="mb-1 block text-sm font-medium">Notes (optional)</label>
+            <label className="mb-1 block text-sm font-medium">About the company (optional)</label>
             <textarea
               value={notes}
               onChange={(e) => setNotes(e.target.value)}

@@ -3,12 +3,15 @@
 import { useEffect, useState, use as usePromise } from "react";
 import { useRouter } from "next/navigation";
 import { Nav } from "@/components/Nav";
+import { exclusionModuleLabel } from "@/lib/zuper/testRecords";
 
 interface Customer {
   id: string;
   name: string;
   zuperAccountId: string;
   website: string | null;
+  notes: string | null;
+  testExclusions: { modules: Record<string, { count: number; examples: string[] }> } | null;
   credential: { baseUrl: string; lastVerifiedAt: string | null } | null;
   syncRuns: { id: string; status: string; periodStart: string; periodEnd: string; errorMessage: string | null; createdAt: string }[];
 }
@@ -43,6 +46,7 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
   const [loadingMetrics, setLoadingMetrics] = useState(false);
   const [generatingReport, setGeneratingReport] = useState(false);
   const [website, setWebsite] = useState("");
+  const [about, setAbout] = useState("");
   const [savingWebsite, setSavingWebsite] = useState(false);
   const [reportType, setReportType] = useState<"QBR" | "MBR" | "HBR">("QBR");
 
@@ -52,6 +56,7 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
       const c = (await res.json()).customer;
       setCustomer(c);
       setWebsite(c.website ?? "");
+      setAbout(c.notes ?? "");
     }
   }
 
@@ -61,7 +66,7 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
     await fetch(`/api/customers/${id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ website }),
+      body: JSON.stringify({ website, notes: about }),
     });
     setSavingWebsite(false);
     await loadCustomer();
@@ -168,6 +173,7 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
   }
 
   const latestSync = customer.syncRuns[0];
+  const excluded = Object.entries(customer.testExclusions?.modules ?? {}).filter(([, m]) => m.count > 0);
 
   return (
     <div>
@@ -179,18 +185,31 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
         </div>
 
         <section className="rounded-lg border border-neutral-200 p-5 dark:border-neutral-800">
-          <h2 className="mb-3 font-medium">Company website</h2>
+          <h2 className="mb-3 font-medium">Company context</h2>
           <p className="mb-3 text-xs text-neutral-500">
-            Best-effort scraped for business context (industry, services) to ground AI-generated recommendations.
-            Never used as a source of numbers.
+            Used by the Account Brief to understand the business. The website is scraped for framing only and is never a
+            source of numbers.
           </p>
-          <form onSubmit={saveWebsite} className="flex gap-2">
-            <input
-              value={website}
-              onChange={(e) => setWebsite(e.target.value)}
-              placeholder="acmefieldservices.com"
-              className="flex-1 rounded-md border border-neutral-300 px-3 py-2 text-sm dark:border-neutral-700 dark:bg-neutral-900"
-            />
+          <form onSubmit={saveWebsite} className="space-y-3">
+            <div>
+              <label className="mb-1 block text-sm font-medium">Website</label>
+              <input
+                value={website}
+                onChange={(e) => setWebsite(e.target.value)}
+                placeholder="acmefieldservices.com"
+                className="w-full rounded-md border border-neutral-300 px-3 py-2 text-sm dark:border-neutral-700 dark:bg-neutral-900"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-sm font-medium">About the company</label>
+              <textarea
+                value={about}
+                onChange={(e) => setAbout(e.target.value)}
+                rows={5}
+                placeholder="What they do and who they serve (e.g. commercial HVAC maintenance for schools and offices in Texas, ~40 technicians, 2 branches). Why they bought Zuper, what they care about, anything said in the last review."
+                className="w-full rounded-md border border-neutral-300 px-3 py-2 text-sm dark:border-neutral-700 dark:bg-neutral-900"
+              />
+            </div>
             <button
               type="submit"
               disabled={savingWebsite}
@@ -277,6 +296,20 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
               Last sync: {latestSync.status}
               {latestSync.errorMessage ? ` — ${latestSync.errorMessage}` : ""}
             </p>
+          )}
+          {excluded.length > 0 && (
+            <details className="text-sm text-neutral-500">
+              <summary className="cursor-pointer">
+                Left out as test / Zuper setup data: {excluded.map(([m, v]) => `${v.count.toLocaleString()} ${exclusionModuleLabel(m)}`).join(", ")}
+              </summary>
+              <ul className="mt-2 list-disc space-y-1 pl-5">
+                {excluded.map(([m, v]) => (
+                  <li key={m}>
+                    {exclusionModuleLabel(m)}: {v.examples.join("; ")}
+                  </li>
+                ))}
+              </ul>
+            </details>
           )}
         </section>
 

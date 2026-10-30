@@ -45,17 +45,47 @@ function validateNoInventedNumbers(text: string, inputJson: unknown): boolean {
   return true;
 }
 
-async function callGemini(systemInstruction: string, prompt: string, maxOutputTokens: number): Promise<string> {
+async function callGemini(
+  systemInstruction: string,
+  prompt: string,
+  maxOutputTokens: number,
+  { thinkingBudget = 0, json = false }: { thinkingBudget?: number; json?: boolean } = {}
+): Promise<string> {
   const ai = client();
   const res = await ai.models.generateContent({
     model: GEMINI_MODEL,
     contents: prompt,
     // Gemini 2.5 counts "thinking" tokens against maxOutputTokens, which truncated these short
-    // outputs (and silently fell back to templates). The inputs are pre-computed numbers — no
-    // reasoning budget is needed.
-    config: { systemInstruction, maxOutputTokens, thinkingConfig: { thinkingBudget: 0 } },
+    // outputs (and silently fell back to templates). Rewording pre-computed numbers needs no
+    // reasoning budget; callers that ask for judgement (the Account Brief) pass one and a larger max.
+    config: { systemInstruction, maxOutputTokens, thinkingConfig: { thinkingBudget }, ...(json ? { responseMimeType: "application/json" } : {}) },
   });
   return (res.text ?? "").trim();
+}
+
+/**
+ * Asks for a JSON object and returns it parsed — or null when AI is off, the call fails twice, the
+ * output isn't the expected shape, or it contains a number that isn't in `facts`.
+ */
+export async function generateCheckedJson<T>(
+  system: string,
+  prompt: string,
+  facts: unknown,
+  isValid: (v: unknown) => v is T,
+  { maxOutputTokens = 4000, thinkingBudget = 0 }: { maxOutputTokens?: number; thinkingBudget?: number } = {}
+): Promise<T | null> {
+  if (!aiEnabled()) return null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const text = await callGemini(system, prompt, maxOutputTokens, { thinkingBudget, json: true });
+      if (!validateNoInventedNumbers(text, facts)) continue;
+      const parsed: unknown = JSON.parse(text.replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim());
+      if (isValid(parsed)) return parsed;
+    } catch {
+      // network/API/parse failure — retry once, then give up
+    }
+  }
+  return null;
 }
 
 async function generate(

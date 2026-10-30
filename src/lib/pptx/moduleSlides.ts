@@ -24,8 +24,8 @@ import { SETUP_MODULES, connectSlide, coverageSlides, insertChain, jobServiceSli
 import { INVOICE_COLLECTION_DEFINITION, QUOTE_ACCEPTANCE_DEFINITION } from "@/lib/reports/classify";
 import { momentum, topAcross, type Callout } from "@/lib/reports/callouts";
 import type { SharedDeckData } from "./ebrTokens";
-import { detectIndustry, type MetricKey } from "@/lib/reports/industry";
-import type { CallSummary } from "@/lib/reports/catalogMetrics";
+import { detectIndustry, type IndustryResult, type MetricKey } from "@/lib/reports/industry";
+import type { CallSummary, CoverageRow } from "@/lib/reports/catalogMetrics";
 import { generateStoryNarrative } from "@/lib/ai";
 import { METRIC_TITLES, flowSlide, growthSlide, industrySlide, journeySlide, thenNowSlide, type MetricReading } from "./storySlides";
 
@@ -1058,8 +1058,17 @@ function topCalloutsSlide(ctx: DeckContext, top: Callout[]): ShapeWriter {
   return w;
 }
 
+/** What the Account Brief needs from the module pass (see lib/reports/accountBrief.ts). */
+export interface ModuleSlidesResult {
+  /** The Top Call-outs slide, which the brief slide follows. */
+  topCalloutsPath: string;
+  industry: IndustryResult;
+  monthsOnZuper: number | null;
+  coverage: CoverageRow[];
+}
+
 /** Computes every module's metrics and splices the deep-dive slides into their template sections. */
-export async function insertModuleSlides(zip: JSZip, input: ModuleDeckInput): Promise<void> {
+export async function insertModuleSlides(zip: JSZip, input: ModuleDeckInput): Promise<ModuleSlidesResult> {
   const { customerId, range, shared } = input;
   const { sync, jobsDeep: jobs, quotesDeep: quotes, exec, catalog, delivery } = shared;
   const [accounts, team, projects, invoices, portalPay, coverage] = await Promise.all([
@@ -1173,7 +1182,8 @@ export async function insertModuleSlides(zip: JSZip, input: ModuleDeckInput): Pr
   );
 
   // Executive summary, placed right after the scope slide once every slide's call-outs exist.
-  await insertGeneratedSlide(zip, scope, topCalloutsSlide(ctx, topAcross(collectedCallouts(zip), 6, 2)));
+  const topCalloutsPath = await insertGeneratedSlide(zip, scope, topCalloutsSlide(ctx, topAcross(collectedCallouts(zip), 6, 2)));
+  return { topCalloutsPath, industry, monthsOnZuper: j.goLive ? j.monthsOnZuper : null, coverage };
 }
 
 function storyValue(m: { unit: string }, v: number): string {

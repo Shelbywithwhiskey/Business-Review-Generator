@@ -18,7 +18,12 @@ model Customer {
   // (industry, services, size cues) to ground AI-generated recommendations.
   // Never a source of numbers, only tone/framing (see lib/website.ts).
   website        String?
+  // "About the company", typed by the CSM: what the business does, who it serves, why it bought Zuper.
+  // Fed to the Account Brief as context (lib/reports/accountBrief.ts).
   notes          String?
+  // Test/setup records dropped at sync, per module: { updatedAt, modules: { jobs: { count, examples } } }
+  // (lib/zuper/testRecords.ts). Shown on the Account Brief so it's clear what was left out.
+  testExclusions Json?
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 

@@ -4,8 +4,10 @@ import JSZip from "jszip";
 import type { DateRange } from "@/lib/zuper/modules";
 import { buildEbrTokenData, computeSharedDeckData, type RunFix } from "./ebrTokens";
 import { setSlideNotes } from "./slideNotes";
-import { ShapeWriter, appendShapesToSlide, collectCallouts } from "./generatedSlide";
+import { ShapeWriter, appendShapesToSlide, collectCallouts, collectedCallouts, insertGeneratedSlide } from "./generatedSlide";
 import { calloutLine } from "@/lib/reports/callouts";
+import { buildAccountBrief, type AccountBrief } from "@/lib/reports/accountBrief";
+import { accountBriefSlide } from "./briefSlide";
 import { injectLineChartData } from "./chartData";
 import { insertUsageSlide } from "./usageSlide";
 import { insertAutomationSlide } from "./automationSlide";
@@ -52,11 +54,20 @@ export interface GenerateEbrPptxOptions {
   customerName: string;
   /** Best-effort business context source — see lib/website.ts. Null/undefined is fine (just no context). */
   customerWebsite?: string | null;
+  /** The CSM's "About the company" notes — context for the Account Brief. */
+  about?: string | null;
+  /** Customer.testExclusions — what sync left out as test data. */
+  testExclusions?: unknown;
   range: DateRange;
   reportTitle: string;
 }
 
-export async function generateEbrPptx(options: GenerateEbrPptxOptions): Promise<Buffer> {
+function briefPeriodLabel(range: DateRange): string {
+  const f = (d: Date) => new Date(d).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
+  return `${f(range.start)} – ${f(range.end)}`;
+}
+
+export async function generateEbrPptx(options: GenerateEbrPptxOptions): Promise<{ buffer: Buffer; brief: AccountBrief }> {
   const { customerId, customerName, customerWebsite, range, reportTitle } = options;
 
   const shared = await computeSharedDeckData(customerId, range, customerWebsite ?? null);
@@ -106,8 +117,23 @@ export async function generateEbrPptx(options: GenerateEbrPptxOptions): Promise<
   // Generated (non-template) slides. Template charts are chart1–6; generated charts take the next free numbers.
   await insertUsageSlide(zip, usage, periodLabel);
   const automationSlidePath = await insertAutomationSlide(zip, workflowSummary, customerName, periodLabel);
-  await insertModuleSlides(zip, { customerId, customerName, range, usage, workflowSummary, automationSlidePath, shared });
+  const modules = await insertModuleSlides(zip, { customerId, customerName, range, usage, workflowSummary, automationSlidePath, shared });
+
+  // Account Brief from every call-out in the deck, right after Top Call-outs.
+  const labels = (status: string) => modules.coverage.filter((c) => c.status === status).map((c) => c.label);
+  const brief = await buildAccountBrief({
+    customerName,
+    periodLabel: briefPeriodLabel(range),
+    about: options.about ?? null,
+    website: shared.website,
+    industry: modules.industry,
+    monthsOnZuper: modules.monthsOnZuper,
+    callouts: collectedCallouts(zip),
+    modules: { inUse: labels("ok"), noRecords: labels("empty"), notEnabled: labels("not_available") },
+    testExclusions: options.testExclusions,
+  });
+  await insertGeneratedSlide(zip, modules.topCalloutsPath, accountBriefSlide(customerName, brief));
 
   const buffer = await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
-  return buffer;
+  return { buffer, brief };
 }

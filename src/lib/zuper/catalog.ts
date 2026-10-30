@@ -3,6 +3,7 @@ import { prisma } from "@/lib/db";
 import { ZuperApiError, ZuperClient } from "./client";
 import { compactRecord, fieldStats, type CompactRecord } from "./compact";
 import type { DateRange } from "./modules";
+import { ExclusionLog, keepReal } from "./testRecords";
 
 // ---------------------------------------------------------------------------
 // "Pull everything": every list endpoint in Zuper's public API reference
@@ -319,6 +320,15 @@ export async function runCatalogSync(
 ): Promise<{ nextIndex: number | null; results: CatalogModuleResult[] }> {
   const clients = { main: new ZuperClient(apiKey, apiBaseUrl), connect: new ZuperClient(apiKey, connectBaseUrl(apiBaseUrl)) };
   const results: CatalogModuleResult[] = [];
+  const exclusions = new ExclusionLog();
+  /** Records this chunk's test-record exclusions on the Customer (merged per module, so chunks add up). */
+  const finish = async (nextIndex: number | null) => {
+    if (Object.keys(exclusions.modules).length) {
+      const previous = await prisma.customer.findUnique({ where: { id: customerId }, select: { testExclusions: true } });
+      await prisma.customer.update({ where: { id: customerId }, data: { testExclusions: json(exclusions.mergeInto(previous?.testExclusions)) }, select: { id: true } });
+    }
+    return { nextIndex, results };
+  };
 
   if (startIndex === 0) {
     for (const n of NOT_IN_API) {
@@ -327,13 +337,15 @@ export async function runCatalogSync(
   }
 
   for (let i = startIndex; i < CATALOG.length; i++) {
-    if (Date.now() > deadline - 20_000) return { nextIndex: i, results };
+    if (Date.now() > deadline - 20_000) return finish(i);
     const mod = CATALOG[i];
     const client = clients[mod.host ?? "main"];
     const endpoint = `${mod.method ?? "GET"} ${mod.host === "connect" ? "connect:" : ""}/${mod.path}`;
     try {
       const { items, total, truncated, partialError } = await fetchModule(mod, client, range, deadline - 25_000);
-      const compacted: { uid: string; data: CompactRecord; createdAt: Date | null }[] = items.map((raw, idx) => ({
+      // Test/setup records are dropped (and, since the module's rows are replaced wholesale, any stored earlier go too).
+      const real = mod.countOnly ? items : keepReal(items, mod.key, exclusions, (raw) => pickUid(raw, mod.uidKeys, ""), { ownEmail: mod.key === "users" });
+      const compacted: { uid: string; data: CompactRecord; createdAt: Date | null }[] = real.map((raw, idx) => ({
         uid: pickUid(raw, mod.uidKeys, `row-${idx}`),
         data: compactRecord(raw),
         createdAt: pickDate(raw, mod.dateKeys),
@@ -374,7 +386,7 @@ export async function runCatalogSync(
       results.push({ key: mod.key, status, recordCount: 0, message });
     }
   }
-  return { nextIndex: null, results };
+  return finish(null);
 }
 
 export async function upsertCoverage(

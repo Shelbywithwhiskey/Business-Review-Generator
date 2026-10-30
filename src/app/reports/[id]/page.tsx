@@ -2,6 +2,98 @@
 
 import { useEffect, useState, use as usePromise } from "react";
 import { Nav } from "@/components/Nav";
+import type { AccountBrief, BriefItem } from "@/lib/reports/accountBrief";
+
+const BRIEF_KEY = "account_brief";
+const HEALTH_STYLE: Record<AccountBrief["health"]["status"], { label: string; cls: string }> = {
+  healthy: { label: "Healthy", cls: "bg-green-100 text-green-800 dark:bg-green-950 dark:text-green-200" },
+  steady: { label: "Steady", cls: "bg-neutral-200 text-neutral-800 dark:bg-neutral-800 dark:text-neutral-200" },
+  at_risk: { label: "At risk", cls: "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-200" },
+};
+
+function BriefList({ title, items, tone }: { title: string; items: BriefItem[]; tone: string }) {
+  return (
+    <div>
+      <h3 className={`mb-2 text-xs font-semibold uppercase tracking-wide ${tone}`}>{title}</h3>
+      {items.length === 0 ? (
+        <p className="text-sm text-neutral-500">Nothing flagged this period.</p>
+      ) : (
+        <ul className="space-y-3">
+          {items.map((it) => (
+            <li key={it.headline} className="text-sm">
+              <p className="font-medium">{it.headline}</p>
+              <p className="text-neutral-600 dark:text-neutral-400">{it.detail}</p>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function BriefPanel({ brief, busy, error, onGenerate }: { brief: AccountBrief | null; busy: boolean; error: string | null; onGenerate: () => void }) {
+  return (
+    <section className="mb-10 rounded-lg border border-neutral-200 p-5 dark:border-neutral-800">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <h2 className="text-lg font-semibold">Account Brief</h2>
+        <button
+          onClick={onGenerate}
+          disabled={busy}
+          className="no-print rounded-md border border-neutral-300 px-3 py-1.5 text-sm disabled:opacity-50 dark:border-neutral-700"
+        >
+          {busy ? "Building… (up to a minute)" : brief ? "Refresh brief" : "Generate brief"}
+        </button>
+      </div>
+      {error && <p className="mb-3 text-sm text-red-600">{error}</p>}
+      {!brief ? (
+        <p className="text-sm text-neutral-500">
+          An account manager&apos;s read of this account — what the business does, how it&apos;s using Zuper, wins, risks,
+          opportunities and next steps. Built from the deck&apos;s findings and the company context on the customer page.
+          Downloading the deck also builds it.
+        </p>
+      ) : (
+        <div className="space-y-6">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className={`rounded-full px-2.5 py-0.5 text-xs font-semibold ${HEALTH_STYLE[brief.health.status].cls}`}>
+              {HEALTH_STYLE[brief.health.status].label}
+            </span>
+            <span className="text-sm text-neutral-600 dark:text-neutral-400">{brief.health.why}</span>
+          </div>
+          <p className="leading-relaxed">{brief.businessRead}</p>
+          <div className="grid gap-6 sm:grid-cols-3">
+            <BriefList title="What's working" items={brief.highlights} tone="text-green-700 dark:text-green-400" />
+            <BriefList title="Risks" items={brief.risks} tone="text-red-700 dark:text-red-400" />
+            <BriefList title="Opportunities" items={brief.opportunities} tone="text-orange-700 dark:text-orange-400" />
+          </div>
+          <div className="grid gap-6 sm:grid-cols-2">
+            <div>
+              <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-neutral-500">Next actions</h3>
+              <ol className="list-decimal space-y-1 pl-5 text-sm">
+                {brief.nextActions.map((a) => (
+                  <li key={a}>{a}</li>
+                ))}
+              </ol>
+            </div>
+            {brief.questions.length > 0 && (
+              <div>
+                <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-neutral-500">Questions to ask</h3>
+                <ul className="list-disc space-y-1 pl-5 text-sm">
+                  {brief.questions.map((q) => (
+                    <li key={q}>{q}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+          <p className="text-xs text-neutral-500">
+            {brief.source === "ai" ? "Written by AI from the deck's findings; every number is checked against them." : "Built from the deck's ranked findings (AI unavailable)."}{" "}
+            {brief.excludedNote} Built {new Date(brief.generatedAt).toLocaleString()} for {brief.periodLabel}.
+          </p>
+        </div>
+      )}
+    </section>
+  );
+}
 
 interface Section {
   id: string;
@@ -101,12 +193,31 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
   const { id } = usePromise(params);
   const [report, setReport] = useState<ReportData | null>(null);
   const [saving, setSaving] = useState<string | null>(null);
+  const [briefBusy, setBriefBusy] = useState(false);
+  const [briefError, setBriefError] = useState<string | null>(null);
 
-  useEffect(() => {
-    fetch(`/api/reports/${id}`)
+  function loadReport() {
+    return fetch(`/api/reports/${id}`)
       .then((r) => r.json())
       .then((d) => setReport(d.report));
+  }
+
+  useEffect(() => {
+    loadReport();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
+
+  async function generateBrief() {
+    setBriefBusy(true);
+    setBriefError(null);
+    const res = await fetch(`/api/reports/${id}/brief`, { method: "POST" });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      setBriefError(data.error ?? "Could not build the brief.");
+    }
+    await loadReport();
+    setBriefBusy(false);
+  }
 
   function updateSectionLocal(sectionId: string, patch: Partial<Section>) {
     setReport((r) =>
@@ -165,8 +276,15 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
           </p>
         </header>
 
+        <BriefPanel
+          brief={(report.sections.find((s) => s.sectionKey === BRIEF_KEY)?.contentJson as AccountBrief | undefined) ?? null}
+          busy={briefBusy}
+          error={briefError}
+          onGenerate={generateBrief}
+        />
+
         <div className="space-y-10">
-          {report.sections.map((section) => (
+          {report.sections.filter((s) => s.sectionKey !== BRIEF_KEY).map((section) => (
             <section key={section.id}>
               <h2 className="mb-2 text-lg font-semibold">
                 {SECTION_TITLES[section.sectionKey] ?? section.sectionKey}

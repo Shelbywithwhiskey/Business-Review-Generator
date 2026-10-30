@@ -21,6 +21,7 @@ import {
 } from "./modules";
 import { computeTechnicianRollups, computeTimesheetHours } from "@/lib/analytics";
 import { upsertCoverage } from "./catalog";
+import { ExclusionLog } from "./testRecords";
 
 export const ALL_MODULES: ModuleKey[] = [
   "jobs",
@@ -57,6 +58,26 @@ export async function getOrDiscoverConnection(customerId: string) {
   });
 }
 
+/** Deletes stored rows whose Zuper uid this sync excluded as test data (stored before the rule existed, or renamed since). */
+async function purgeExcluded(customerId: string, log: ExclusionLog) {
+  const ids = (module: string) => log.excludedUids(module);
+  const jobs = ids("jobs");
+  await Promise.all([
+    jobs.length && prisma.jobLineItem.deleteMany({ where: { customerId, zuperJobId: { in: jobs } } }),
+    jobs.length && prisma.job.deleteMany({ where: { customerId, zuperJobId: { in: jobs } } }),
+    ids("invoices").length && prisma.invoice.deleteMany({ where: { customerId, zuperInvoiceId: { in: ids("invoices") } } }),
+    ids("quotes").length && prisma.quote.deleteMany({ where: { customerId, zuperQuoteId: { in: ids("quotes") } } }),
+    ids("teams").length && prisma.technician.deleteMany({ where: { customerId, zuperUserId: { in: ids("teams") } } }),
+    ids("payments").length && prisma.payment.deleteMany({ where: { customerId, zuperPaymentId: { in: ids("payments") } } }),
+    ids("products").length && prisma.product.deleteMany({ where: { customerId, zuperProductId: { in: ids("products") } } }),
+    ids("expenses").length && prisma.expense.deleteMany({ where: { customerId, zuperExpenseId: { in: ids("expenses") } } }),
+    ids("endCustomers").length && prisma.endCustomerLedger.deleteMany({ where: { customerId, zuperCustomerId: { in: ids("endCustomers") } } }),
+    ids("organizations").length && prisma.organization.deleteMany({ where: { customerId, zuperOrganizationId: { in: ids("organizations") } } }),
+    ids("properties").length && prisma.property.deleteMany({ where: { customerId, zuperPropertyId: { in: ids("properties") } } }),
+    ids("projects").length && prisma.project.deleteMany({ where: { customerId, zuperProjectId: { in: ids("projects") } } }),
+  ]);
+}
+
 /** apiKey is supplied by the user for this sync only — it is never persisted or logged. */
 export async function runSync(
   customerId: string,
@@ -79,6 +100,8 @@ export async function runSync(
 
   const client = new ZuperClient(apiKey, credential.baseUrl);
   const notes: string[] = [];
+  // Test/setup records the modules drop (testRecords.ts); summarised on the Customer at the end.
+  const exclusions = new ExclusionLog();
 
   /** Runs an optional module; on failure records "module: reason" and carries on. */
   async function optional(key: ModuleKey, fn: () => Promise<void>) {
@@ -94,7 +117,7 @@ export async function runSync(
 
   try {
     if (modules.includes("jobs")) {
-      for await (const page of jobsModule.fetch(client)) {
+      for await (const page of jobsModule.fetch(client, exclusions)) {
         await Promise.all(
           page.map(({ job }) => {
             const data = { ...job, statusHistory: json(job.statusHistory), extra: json(job.extra) };
@@ -129,7 +152,7 @@ export async function runSync(
     }
 
     if (modules.includes("invoices")) {
-      for await (const page of invoicesModule.fetch(client)) {
+      for await (const page of invoicesModule.fetch(client, exclusions)) {
         await Promise.all(
           page.map((invoice) =>
             prisma.invoice.upsert({
@@ -144,7 +167,7 @@ export async function runSync(
     }
 
     if (modules.includes("quotes")) {
-      for await (const page of quotesModule.fetch(client)) {
+      for await (const page of quotesModule.fetch(client, exclusions)) {
         await Promise.all(
           page.map((quote) =>
             prisma.quote.upsert({
@@ -159,7 +182,7 @@ export async function runSync(
     }
 
     if (modules.includes("teams")) {
-      for await (const page of teamsModule.fetch(client)) {
+      for await (const page of teamsModule.fetch(client, exclusions)) {
         await Promise.all(
           page.map((tech) =>
             prisma.technician.upsert({
@@ -190,9 +213,16 @@ export async function runSync(
     }
 
     if (modules.includes("payments")) {
-      for await (const page of paymentsModule.fetch(client)) {
+      // Payments against a test invoice are test money too.
+      const testInvoices = new Set(exclusions.excludedUids("invoices"));
+      for await (const page of paymentsModule.fetch(client, exclusions)) {
+        const real = page.filter((p) => {
+          if (!p.zuperInvoiceId || !testInvoices.has(p.zuperInvoiceId)) return true;
+          exclusions.add("payments", "payment on a test invoice", p.zuperPaymentId);
+          return false;
+        });
         await Promise.all(
-          page.map((payment) =>
+          real.map((payment) =>
             prisma.payment.upsert({
               where: { customerId_zuperPaymentId: { customerId, zuperPaymentId: payment.zuperPaymentId } },
               create: { ...payment, customerId, syncRunId: syncRun.id },
@@ -205,7 +235,7 @@ export async function runSync(
     }
 
     if (modules.includes("products")) {
-      for await (const page of productsModule.fetch(client)) {
+      for await (const page of productsModule.fetch(client, exclusions)) {
         await Promise.all(
           page.map((product) =>
             prisma.product.upsert({
@@ -220,7 +250,7 @@ export async function runSync(
     }
 
     await optional("expenses", async () => {
-      for await (const page of expensesModule.fetch(client)) {
+      for await (const page of expensesModule.fetch(client, exclusions)) {
         await Promise.all(
           page.map((expense) =>
             prisma.expense.upsert({
@@ -250,7 +280,7 @@ export async function runSync(
     });
 
     if (modules.includes("endCustomers")) {
-      for await (const page of endCustomersModule.fetch(client)) {
+      for await (const page of endCustomersModule.fetch(client, exclusions)) {
         await Promise.all(
           page.map((endCustomer) =>
             prisma.endCustomerLedger.upsert({
@@ -265,7 +295,7 @@ export async function runSync(
     }
 
     await optional("organizations", async () => {
-      for await (const page of organizationsModule.fetch(client)) {
+      for await (const page of organizationsModule.fetch(client, exclusions)) {
         await Promise.all(
           page.map((org) =>
             prisma.organization.upsert({
@@ -280,7 +310,7 @@ export async function runSync(
     });
 
     await optional("properties", async () => {
-      for await (const page of propertiesModule.fetch(client)) {
+      for await (const page of propertiesModule.fetch(client, exclusions)) {
         await Promise.all(
           page.map((property) =>
             prisma.property.upsert({
@@ -295,7 +325,7 @@ export async function runSync(
     });
 
     await optional("projects", async () => {
-      for await (const page of projectsModule.fetch(client)) {
+      for await (const page of projectsModule.fetch(client, exclusions)) {
         await Promise.all(
           page.map((project) =>
             prisma.project.upsert({
@@ -354,6 +384,15 @@ export async function runSync(
         });
       });
     }
+
+    // Rows an earlier sync stored for records now recognised as test data, then the per-module summary.
+    await purgeExcluded(customerId, exclusions);
+    const previous = await prisma.customer.findUnique({ where: { id: customerId }, select: { testExclusions: true } });
+    await prisma.customer.update({
+      where: { id: customerId },
+      data: { testExclusions: json(exclusions.mergeInto(previous?.testExclusions)) },
+      select: { id: true },
+    });
 
     // Rollups derived from raw synced rows, not from the Zuper API directly.
     if (modules.includes("jobs") && modules.includes("teams")) {

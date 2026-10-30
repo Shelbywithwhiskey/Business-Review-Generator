@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { del, issueSignedToken, list, presignUrl, put } from "@vercel/blob";
-import { prisma } from "@/lib/db";
-import { generateEbrPptx } from "@/lib/pptx/ebrExport";
+import { buildReportDeck } from "@/lib/reports/reportDeck";
 
 // Large accounts (tens of thousands of synced records) need more than a minute to assemble the deck.
 export const maxDuration = 300;
@@ -13,34 +12,16 @@ const LINK_TTL_MS = 60 * 60 * 1000;
 export async function GET(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
 
-  const report = await prisma.report.findUnique({
-    where: { id },
-    include: { customer: { select: { id: true, name: true, website: true } } },
-  });
-  if (!report) return NextResponse.json({ error: "Report not found" }, { status: 404 });
-
-  const reportTitle =
-    report.type === "QBR"
-      ? "Quarterly Business Review"
-      : report.type === "MBR"
-        ? "Monthly Business Review"
-        : "Half-Year Business Review";
-
-  let buffer: Buffer;
+  let deck: Awaited<ReturnType<typeof buildReportDeck>>;
   try {
-    buffer = await generateEbrPptx({
-      customerId: report.customer.id,
-      customerName: report.customer.name,
-      customerWebsite: report.customer.website,
-      range: { start: report.periodStart, end: report.periodEnd },
-      reportTitle,
-    });
+    // Also refreshes the report's Account Brief, so the page and the deck match.
+    deck = await buildReportDeck(id);
   } catch (err) {
     console.error(`EBR export failed for report ${id}`, err);
     return NextResponse.json({ error: `Could not build the deck: ${err instanceof Error ? err.message : String(err)}` }, { status: 500 });
   }
-
-  const filename = `${report.customer.name.trim().replace(/[^a-z0-9]+/gi, "_")}_EBR_${new Date(report.periodEnd).toISOString().slice(0, 10)}.pptx`;
+  if (!deck) return NextResponse.json({ error: "Report not found" }, { status: 404 });
+  const { buffer, filename } = deck;
 
   // Vercel caps a function response at 4.5 MB and the template alone is ~18 MB, so on Vercel the deck
   // goes to private Blob storage and the browser is redirected to a short-lived signed link.

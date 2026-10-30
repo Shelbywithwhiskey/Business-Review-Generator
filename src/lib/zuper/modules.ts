@@ -1,5 +1,6 @@
 import { ZuperClient } from "./client";
 import { compactRecord, type CompactRecord } from "./compact";
+import { keepReal, type ExclusionLog } from "./testRecords";
 
 export interface DateRange {
   start: Date;
@@ -199,12 +200,13 @@ export interface NormalizedWorkflow {
 // endpoints below actually filter by date server-side (confirmed by
 // comparing total_records with/without every start/end param variant), so
 // modules pull full history and lib/analytics.ts filters by period locally.
+// Given an ExclusionLog, each module drops test/setup records (see testRecords.ts).
 
 export const jobsModule = {
   key: "jobs" as const,
-  async *fetch(client: ZuperClient) {
+  async *fetch(client: ZuperClient, log?: ExclusionLog) {
     for await (const page of client.paginate<Record<string, any>>("jobs")) {
-      yield page.map((raw) => ({ job: normalizeJob(raw), lineItems: normalizeJobLineItems(raw) }));
+      yield keepReal(page, "jobs", log, (raw) => raw.job_uid).map((raw) => ({ job: normalizeJob(raw), lineItems: normalizeJobLineItems(raw) }));
     }
   },
 };
@@ -279,9 +281,9 @@ function normalizeJob(raw: Record<string, any>): NormalizedJob {
 
 export const organizationsModule = {
   key: "organizations" as const,
-  async *fetch(client: ZuperClient) {
+  async *fetch(client: ZuperClient, log?: ExclusionLog) {
     for await (const page of client.paginate<Record<string, any>>("organization")) {
-      yield page.map(
+      yield keepReal(page, "organizations", log, (raw) => raw.organization_uid).map(
         (raw): NormalizedOrganization => ({
           zuperOrganizationId: String(raw.organization_uid),
           name: raw.organization_name ?? "Unnamed organization",
@@ -296,9 +298,9 @@ export const organizationsModule = {
 
 export const propertiesModule = {
   key: "properties" as const,
-  async *fetch(client: ZuperClient) {
+  async *fetch(client: ZuperClient, log?: ExclusionLog) {
     for await (const page of client.paginate<Record<string, any>>("property")) {
-      yield page.map(
+      yield keepReal(page, "properties", log, (raw) => raw.property_uid).map(
         (raw): NormalizedProperty => ({
           zuperPropertyId: String(raw.property_uid),
           name: raw.property_name ?? "Unnamed property",
@@ -318,9 +320,9 @@ export const propertiesModule = {
  * holds the current one when present. */
 export const projectsModule = {
   key: "projects" as const,
-  async *fetch(client: ZuperClient) {
+  async *fetch(client: ZuperClient, log?: ExclusionLog) {
     for await (const page of client.paginate<Record<string, any>>("projects")) {
-      yield page.map((raw): NormalizedProject => {
+      yield keepReal(page, "projects", log, (raw) => raw.project_uid ?? raw.id).map((raw): NormalizedProject => {
         const history = Array.isArray(raw.project_status) ? (raw.project_status as Record<string, any>[]) : [];
         const current = raw.project_current_status ?? history[history.length - 1];
         const status = typeof current === "string" ? current : (current?.project_status_name ?? current?.status_name ?? null);
@@ -337,9 +339,9 @@ export const projectsModule = {
 
 export const invoicesModule = {
   key: "invoices" as const,
-  async *fetch(client: ZuperClient) {
+  async *fetch(client: ZuperClient, log?: ExclusionLog) {
     for await (const page of client.paginate<Record<string, any>>("invoice")) {
-      yield page.map(normalizeInvoice);
+      yield keepReal(page, "invoices", log, (raw) => raw.invoice_uid).map(normalizeInvoice);
     }
   },
 };
@@ -361,9 +363,9 @@ function normalizeInvoice(raw: Record<string, any>): NormalizedInvoice {
 /** Zuper calls these "estimates" in the API; the product UI shows them as Quotes/Proposals. */
 export const quotesModule = {
   key: "quotes" as const,
-  async *fetch(client: ZuperClient) {
+  async *fetch(client: ZuperClient, log?: ExclusionLog) {
     for await (const page of client.paginate<Record<string, any>>("estimate")) {
-      yield page.map(normalizeQuote);
+      yield keepReal(page, "quotes", log, (raw) => raw.estimate_uid).map(normalizeQuote);
     }
   },
 };
@@ -390,12 +392,13 @@ function normalizeQuote(raw: Record<string, any>): NormalizedQuote {
  * across every team the account has. */
 export const teamsModule = {
   key: "teams" as const,
-  async *fetch(client: ZuperClient) {
+  async *fetch(client: ZuperClient, log?: ExclusionLog) {
     const seen = new Set<string>();
     for await (const page of client.paginate<Record<string, any>>("team")) {
       const batch: NormalizedTechnician[] = [];
       for (const team of page) {
-        for (const user of (team.users as Record<string, any>[] | undefined) ?? []) {
+        // Zuper staff logins (onboarding/support) aren't the customer's seats.
+        for (const user of keepReal((team.users as Record<string, any>[] | undefined) ?? [], "teams", log, (u) => u.user_uid, { ownEmail: true })) {
           const uid = String(user.user_uid);
           if (seen.has(uid)) continue;
           seen.add(uid);
@@ -422,9 +425,9 @@ function normalizeTechnician(raw: Record<string, any>): NormalizedTechnician {
 
 export const paymentsModule = {
   key: "payments" as const,
-  async *fetch(client: ZuperClient) {
+  async *fetch(client: ZuperClient, log?: ExclusionLog) {
     for await (const page of client.paginate<Record<string, any>>("payments/transactions")) {
-      yield page.map(normalizePayment);
+      yield keepReal(page, "payments", log, (raw) => raw.payment_transaction_uid).map(normalizePayment);
     }
   },
 };
@@ -451,9 +454,9 @@ function normalizePayment(raw: Record<string, any>): NormalizedPayment {
 
 export const productsModule = {
   key: "products" as const,
-  async *fetch(client: ZuperClient) {
+  async *fetch(client: ZuperClient, log?: ExclusionLog) {
     for await (const page of client.paginate<Record<string, any>>("product")) {
-      yield page.map(normalizeProduct);
+      yield keepReal(page, "products", log, (raw) => raw.product_uid).map(normalizeProduct);
     }
   },
 };
@@ -477,9 +480,9 @@ function normalizeProduct(raw: Record<string, any>): NormalizedProduct {
  * is best-effort from common Zuper conventions, not a confirmed live response. */
 export const expensesModule = {
   key: "expenses" as const,
-  async *fetch(client: ZuperClient) {
+  async *fetch(client: ZuperClient, log?: ExclusionLog) {
     for await (const page of client.paginate<Record<string, any>>("expenses")) {
-      yield page.map(normalizeExpense);
+      yield keepReal(page, "expenses", log, (raw) => raw.expense_uid ?? raw.id).map(normalizeExpense);
     }
   },
 };
@@ -531,9 +534,9 @@ function normalizeTimesheetEvent(raw: Record<string, any>): NormalizedTimesheetE
  * to this app's Customer model (the CSM's client). */
 export const endCustomersModule = {
   key: "endCustomers" as const,
-  async *fetch(client: ZuperClient) {
+  async *fetch(client: ZuperClient, log?: ExclusionLog) {
     for await (const page of client.paginate<Record<string, any>>("customers")) {
-      yield page.map(normalizeEndCustomer);
+      yield keepReal(page, "endCustomers", log, (raw) => raw.customer_uid).map(normalizeEndCustomer);
     }
   },
 };
