@@ -7,7 +7,7 @@ import { setSlideNotes } from "./slideNotes";
 import { ShapeWriter, appendShapesToSlide, collectCallouts, collectedCallouts, insertGeneratedSlide } from "./generatedSlide";
 import { calloutLine } from "@/lib/reports/callouts";
 import { buildAccountBrief, type AccountBrief } from "@/lib/reports/accountBrief";
-import { accountBriefSlide } from "./briefSlide";
+import { accountBriefSlide, lastSlidePath, referenceSlide } from "./briefSlide";
 import { injectLineChartData } from "./chartData";
 import { insertUsageSlide } from "./usageSlide";
 import { insertAutomationSlide } from "./automationSlide";
@@ -117,22 +117,27 @@ export async function generateEbrPptx(options: GenerateEbrPptxOptions): Promise<
   // Generated (non-template) slides. Template charts are chart1–6; generated charts take the next free numbers.
   await insertUsageSlide(zip, usage, periodLabel);
   const automationSlidePath = await insertAutomationSlide(zip, workflowSummary, customerName, periodLabel);
-  const modules = await insertModuleSlides(zip, { customerId, customerName, range, usage, workflowSummary, automationSlidePath, shared });
+  const modules = await insertModuleSlides(zip, { customerId, customerName, range, usage, workflowSummary, automationSlidePath, shared, reviewName: reportTitle });
 
-  // Account Brief from every call-out in the deck, right after Top Call-outs.
+  // Account Brief from every call-out in the deck, right after Highlights.
   const labels = (status: string) => modules.coverage.filter((c) => c.status === status).map((c) => c.label);
+  const deckCallouts = collectedCallouts(zip);
   const brief = await buildAccountBrief({
     customerName,
+    reviewName: reportTitle,
     periodLabel: briefPeriodLabel(range),
+    yoy: shared.yoy,
     about: options.about ?? null,
     website: shared.website,
     industry: modules.industry,
     monthsOnZuper: modules.monthsOnZuper,
-    callouts: collectedCallouts(zip),
+    callouts: deckCallouts,
     modules: { inUse: labels("ok"), noRecords: labels("empty"), notEnabled: labels("not_available") },
     testExclusions: options.testExclusions,
   });
   await insertGeneratedSlide(zip, modules.topCalloutsPath, accountBriefSlide(customerName, brief));
+  // Every risk / watch item, kept off the customer-facing slides, on the very last slide.
+  await insertGeneratedSlide(zip, await lastSlidePath(zip), referenceSlide(customerName, deckCallouts, brief));
 
   const buffer = await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
   return { buffer, brief };

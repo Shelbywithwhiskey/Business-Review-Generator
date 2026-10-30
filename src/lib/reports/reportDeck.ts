@@ -3,17 +3,13 @@ import { prisma } from "@/lib/db";
 import { generateEbrPptx } from "@/lib/pptx/ebrExport";
 import type { AccountBrief } from "@/lib/reports/accountBrief";
 import { syncReadiness } from "@/lib/zuper/sync";
+import { reportTypeName } from "@/lib/reports/reportTypes";
 
 /** The customer's data isn't in a finished state (no completed sync, or one still running). */
 export class SyncNotReadyError extends Error {}
 
 export const BRIEF_SECTION_KEY = "account_brief";
 
-const REPORT_TITLES: Record<string, string> = {
-  QBR: "Quarterly Business Review",
-  MBR: "Monthly Business Review",
-  HBR: "Half-Year Business Review",
-};
 
 /**
  * Builds a report's EBR deck and stores its Account Brief on the report (as the "account_brief"
@@ -35,7 +31,7 @@ export async function buildReportDeck(reportId: string): Promise<{ buffer: Buffe
     about: report.customer.notes,
     testExclusions: report.customer.testExclusions,
     range: { start: report.periodStart, end: report.periodEnd },
-    reportTitle: REPORT_TITLES[report.type] ?? "Business Review",
+    reportTitle: reportTypeName(report.type),
   });
 
   const contentJson = brief as unknown as Prisma.InputJsonValue;
@@ -47,6 +43,8 @@ export async function buildReportDeck(reportId: string): Promise<{ buffer: Buffe
     select: { id: true },
   });
 
-  const filename = `${report.customer.name.trim().replace(/[^a-z0-9]+/gi, "_")}_EBR_${new Date(report.periodEnd).toISOString().slice(0, 10)}.pptx`;
+  // e.g. Acme_Heating_Quarterly_Business_Review_2026-09-30.pptx — the review's name is its reference everywhere.
+  const safe = (s: string) => s.trim().replace(/[^a-z0-9]+/gi, "_");
+  const filename = `${safe(report.customer.name)}_${safe(reportTypeName(report.type))}_${new Date(report.periodEnd).toISOString().slice(0, 10)}.pptx`;
   return { buffer, filename, brief };
 }

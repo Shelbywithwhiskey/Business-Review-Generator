@@ -510,6 +510,7 @@ enum ReportType {
   QBR
   MBR
   HBR
+  YBR
 }
 
 enum ReportStatus {

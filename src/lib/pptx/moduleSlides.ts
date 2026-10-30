@@ -17,7 +17,7 @@ import {
   type SyncInfo,
   type WorkforceDeepDive,
 } from "@/lib/reports/moduleMetrics";
-import { COLORS, CONTENT_W, CONTENT_X, ShapeWriter, collectedCallouts, fmtInt, fmtMoneyCompact, insertGeneratedSlide, run, truncate } from "./generatedSlide";
+import { COLORS, CONTENT_W, CONTENT_X, ShapeWriter, collectCallouts, collectedCallouts, fmtInt, fmtMoneyCompact, insertGeneratedSlide, isPositive, run, truncate } from "./generatedSlide";
 import { syncCaveat } from "./templateNotes";
 import { computeCoverage, computePortalAndPay } from "@/lib/reports/catalogMetrics";
 import { SETUP_MODULES, connectSlide, coverageSlides, insertChain, jobServiceSlide, moduleSlide, portalPaySlide, setupSlide, timeOnSiteSlide } from "./catalogSlides";
@@ -27,7 +27,7 @@ import type { SharedDeckData } from "./ebrTokens";
 import { detectIndustry, type IndustryResult, type MetricKey } from "@/lib/reports/industry";
 import type { CallSummary, CoverageRow } from "@/lib/reports/catalogMetrics";
 import { generateStoryNarrative } from "@/lib/ai";
-import { METRIC_TITLES, flowSlide, growthSlide, industrySlide, journeySlide, thenNowSlide, type MetricReading } from "./storySlides";
+import { METRIC_TITLES, flowSlide, growthSlide, industrySlide, journeySlide, thenNowSlide, yearOverYearSlide, type MetricReading } from "./storySlides";
 
 const compact = (xs: (string | number | null | false | undefined)[]) => xs.filter((x): x is string => typeof x === "string" && x.length > 0);
 type MaybeCallout = Callout | null | undefined | false | 0 | "";
@@ -1018,6 +1018,8 @@ export interface ModuleDeckInput {
   /** Path of the generated automation slide, so executions can follow it. */
   automationSlidePath: string;
   shared: SharedDeckData;
+  /** e.g. "Quarterly Business Review" — used in slide wording. */
+  reviewName: string;
 }
 
 // ---- Top call-outs (executive summary) ---------------------------------------------------------
@@ -1026,9 +1028,11 @@ const TONE_FILL: Record<Callout["tone"], string> = { win: "E7F6E7", risk: "FBE9E
 const TONE_INK: Record<Callout["tone"], string> = { win: "0B7A0B", risk: "B5271C", opportunity: "C03D00", watch: "4B5563" };
 const TONE_WORD: Record<Callout["tone"], string> = { win: "WIN", risk: "RISK", opportunity: "OPPORTUNITY", watch: "WATCH" };
 
-function topCalloutsSlide(ctx: DeckContext, top: Callout[]): ShapeWriter {
+function topCalloutsSlide(ctx: DeckContext, all: Callout[]): ShapeWriter {
+  // Wins and opportunities only — risks and watch items are on the closing reference slide.
+  const top = topAcross(all.filter(isPositive), 6, 2);
   const w = new ShapeWriter();
-  w.header(`Top Call-outs — ${truncate(ctx.customerName, 40)}`, `The findings that matter most, ${periodText(ctx.range)}  ·  details on the slides that follow`);
+  w.header(`Highlights — ${truncate(ctx.customerName, 40)}`, `What's working and where to grow next, ${periodText(ctx.range)}  ·  details on the slides that follow`);
   const cols = 2;
   const gap = 150000;
   const cw = (CONTENT_W - gap) / cols;
@@ -1156,12 +1160,11 @@ export async function insertModuleSlides(zip: JSZip, input: ModuleDeckInput): Pr
     generateStoryNarrative("industry", { customer: input.customerName, trade: industry.label, whatMattersAndTheirNumbers: matterFacts }, shared.website, industryFallback),
     generateStoryNarrative("journey", journeyFacts, shared.website, journeyFallback),
   ]);
-  await insertChain(zip, scope, [
-    industrySlide(cctx, industry, readings, industryNarrative),
-    journeySlide(cctx, j, journeyNarrative),
-    thenNowSlide(cctx, j),
-    growthSlide(cctx, j),
-  ]);
+  const yoySlide = yearOverYearSlide(cctx, shared.yoy, input.reviewName);
+  await insertChain(zip, scope, [industrySlide(cctx, industry, readings, industryNarrative), journeySlide(cctx, j, journeyNarrative), thenNowSlide(cctx, j), yoySlide, growthSlide(cctx, j)]);
+  // A year-over-year decline is a watch item: when the slide is skipped (nothing grew), its call-outs
+  // still need to reach the brief and the reference slide.
+  if (!yoySlide) collectCallouts(zip, shared.yoy.callouts);
   const inv = shared.quotesDeep;
   await insertGeneratedSlide(
     zip,
@@ -1182,7 +1185,7 @@ export async function insertModuleSlides(zip: JSZip, input: ModuleDeckInput): Pr
   );
 
   // Executive summary, placed right after the scope slide once every slide's call-outs exist.
-  const topCalloutsPath = await insertGeneratedSlide(zip, scope, topCalloutsSlide(ctx, topAcross(collectedCallouts(zip), 6, 2)));
+  const topCalloutsPath = await insertGeneratedSlide(zip, scope, topCalloutsSlide(ctx, collectedCallouts(zip)));
   return { topCalloutsPath, industry, monthsOnZuper: j.goLive ? j.monthsOnZuper : null, coverage };
 }
 

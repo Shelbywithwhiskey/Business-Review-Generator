@@ -2,6 +2,8 @@ import type { DateRange } from "@/lib/zuper/modules";
 import type { IndustryResult, MetricKey } from "@/lib/reports/industry";
 import type { Journey, JourneyMetric } from "@/lib/reports/journey";
 import type { Callout, Tone } from "@/lib/reports/callouts";
+import { formatYoyChange, formatYoyValue, type YearOverYear, type YoyMetric } from "@/lib/reports/yoy";
+import { periodWordFor } from "@/lib/reports/reportTypes";
 import { COLORS, CONTENT_W, CONTENT_X, ShapeWriter, fmtInt, fmtMoneyCompact, run, truncate } from "./generatedSlide";
 
 // ---------------------------------------------------------------------------
@@ -64,9 +66,13 @@ export function industrySlide(ctx: Ctx, ind: IndustryResult, readings: Partial<R
     w.text(rx + 180000, y + 90000, rw * 0.55, 260000, run(METRIC_TITLES[m.metric], { sz: 1150, color: COLORS.ink, bold: true }), { wrap: "none" });
     w.text(rx + 180000, y + 360000, rw * 0.58, rowH - 480000, run(`Why: ${m.why}`, { sz: 850, color: COLORS.muted }));
     const vx = rx + rw * 0.62;
-    if (r) {
-      w.text(vx, y + 60000, rw * 0.36, 380000, run(r.value, { sz: 1800, color: TONE_INK[r.tone], bold: true }), { wrap: "none" });
+    // Slides carry positive data only: a reading that's a risk is named as a focus area here, and its
+    // number goes to the closing reference slide (via the call-out below) and the notes.
+    if (r && r.tone !== "risk") {
+      w.text(vx, y + 60000, rw * 0.36, 380000, run(r.value, { sz: 1800, color: r.tone === "win" ? TONE_INK.win : COLORS.ink, bold: true }), { wrap: "none" });
       w.text(vx, y + 440000, rw * 0.36, rowH - 560000, run(r.note, { sz: 850, color: COLORS.muted }));
+    } else if (r) {
+      w.text(vx, y + 120000, rw * 0.36, 400000, run("A focus area for the next period", { sz: 1100, color: COLORS.orange, bold: true }));
     } else w.text(vx, y + 120000, rw * 0.36, 400000, run("Not measurable from this account's data yet", { sz: 900, color: COLORS.faint }));
   });
   const ny = top + 330000 + matters.length * rowH;
@@ -188,9 +194,10 @@ export function thenNowSlide(ctx: Ctx, j: Journey): ShapeWriter {
   w.header("Then vs Now — What Got Better on Zuper", early ? `First months on Zuper (${early}) vs latest (${now})` : "Comparing the early months on Zuper with today");
   const box = { x: CONTENT_X, y: 1300000, cx: CONTENT_W, cy: 4450000 };
   w.rect(box.x, box.y, box.cx, box.cy, COLORS.white, { radius: 4000, border: COLORS.border });
-  const rows = [...j.metrics].sort((a, b) => Number(b.improved) - Number(a.improved)).slice(0, 8);
+  // Slides carry positive results only; what moved the wrong way is in the notes and on the reference slide.
+  const rows = j.metrics.filter((m) => m.improved).slice(0, 8);
   if (!rows.length) {
-    w.empty(box, j.limitation ?? "Not enough history to compare yet.");
+    w.empty(box, j.limitation ?? (j.metrics.length ? "The early months and now are broadly level — see the notes for detail." : "Not enough history to compare yet."));
   } else {
     w.text(box.x + 200000, box.y + 120000, 900000, 200000, run("● THEN", { sz: 850, color: "9CA3AF", bold: true }), { wrap: "none" });
     w.text(box.x + 1000000, box.y + 120000, 900000, 200000, run("● NOW", { sz: 850, color: COLORS.orange, bold: true }), { wrap: "none" });
@@ -243,6 +250,92 @@ export function thenNowSlide(ctx: Ctx, j: Journey): ShapeWriter {
 
 function compactList(xs: (string | null | undefined)[]): string[] {
   return xs.filter((x): x is string => !!x);
+}
+
+// ---- 3b. Year over year ---------------------------------------------------------------------------
+
+/**
+ * The review period vs the same period last year: what grew (dumbbells, improvements only — declines go
+ * to the reference slide) and how many Zuper capabilities are in use now vs then. Null when the account
+ * wasn't live a year ago or nothing improved.
+ */
+export function yearOverYearSlide(ctx: Ctx, y: YearOverYear, reviewName: string): ShapeWriter | null {
+  if (!y.eligible) return null;
+  const grew = y.metrics.filter((m) => m.improved && m.material).sort((a, b) => yoyMagnitude(b) - yoyMagnitude(a)).slice(0, 6);
+  if (!grew.length && !y.adoption.added.length) return null;
+
+  const w = new ShapeWriter();
+  w.header(`Year over Year — ${truncate(ctx.customerName, 36)}`, `This ${periodWordFor(reviewName)} (${fmtRange(y.current)}) vs the same period last year (${fmtRange(y.previous)})`);
+
+  // Left: usage that grew.
+  const left = { x: CONTENT_X, y: 1300000, cx: CONTENT_W * 0.62, cy: 4450000 };
+  w.rect(left.x, left.y, left.cx, left.cy, COLORS.white, { radius: 4000, border: COLORS.border });
+  w.text(left.x + 200000, left.y + 120000, 3000000, 220000, run("USAGE THAT GREW", { sz: 900, color: COLORS.orange, bold: true }), { wrap: "none" });
+  w.text(left.x + left.cx - 2200000, left.y + 120000, 900000, 200000, run("● LAST YEAR", { sz: 800, color: "9CA3AF", bold: true }), { wrap: "none" });
+  w.text(left.x + left.cx - 1150000, left.y + 120000, 900000, 200000, run("● NOW", { sz: 800, color: COLORS.orange, bold: true }), { wrap: "none" });
+  if (!grew.length) {
+    w.empty(left, "Usage volumes are level with last year — the growth is in adoption (right).");
+  } else {
+    const rowH = Math.min(560000, (left.cy - 460000) / grew.length);
+    const top = left.y + 440000 + Math.max(0, (left.cy - 460000 - grew.length * rowH) / 2);
+    grew.forEach((m, i) =>
+      w.dumbbell(left.x + 200000, top + i * rowH, left.cx - 400000, {
+        label: m.label,
+        before: m.before,
+        after: m.now,
+        beforeText: formatYoyValue(m, m.before),
+        afterText: formatYoyValue(m, m.now),
+        improved: true,
+        delta: formatYoyChange(m),
+      })
+    );
+  }
+
+  // Right: adoption, then vs now.
+  const right = { x: CONTENT_X + CONTENT_W * 0.62 + 150000, y: 1300000, cx: CONTENT_W * 0.38 - 150000, cy: 4450000 };
+  w.rect(right.x, right.y, right.cx, right.cy, COLORS.white, { radius: 4000, border: COLORS.border });
+  w.text(right.x + 200000, right.y + 120000, right.cx - 400000, 220000, run("ZUPER ADOPTION", { sz: 900, color: COLORS.orange, bold: true }), { wrap: "none" });
+  w.hero(right.x + 200000, right.y + 450000, right.cx - 400000, `${y.adoption.before.length} → ${y.adoption.now.length}`, "capabilities in active use, last year → now");
+  const added = y.adoption.added.slice(0, 6);
+  if (added.length) {
+    w.text(right.x + 200000, right.y + 1500000, right.cx - 400000, 220000, run("NEWLY IN USE", { sz: 850, color: "0B7A0B", bold: true }), { wrap: "none" });
+    added.forEach((c, i) => {
+      const cy = right.y + 1800000 + i * 380000;
+      w.rect(right.x + 200000, cy, right.cx - 400000, 300000, "E7F6E7", { radius: 40000 });
+      w.text(right.x + 320000, cy, right.cx - 640000, 300000, run(`+ ${truncate(c, 40)}`, { sz: 1000, color: "0B7A0B", bold: true }), { anchor: "ctr", wrap: "none" });
+    });
+  } else {
+    w.text(right.x + 200000, right.y + 1500000, right.cx - 400000, 900000, run(`Steady use of ${y.adoption.now.slice(0, 5).join(", ")}.`, { sz: 1000, color: COLORS.muted }));
+  }
+
+  w.keyCallouts(y.callouts, "Same period, one year apart.");
+  w.footer("Same calendar window one year apart · quote & collection rows use records 45+ days old in both windows · change is observed, not attributed");
+  const declines = y.metrics.filter((m) => !m.improved && m.material);
+  w.notes = {
+    purpose: "Growth since the same period last year — usage running through Zuper and the breadth of Zuper the business now uses.",
+    talkingPoints: [
+      "Lead with the biggest growth number, then ask what drove it — their answer is the value story for renewal.",
+      y.adoption.added.length ? `Celebrate the newly adopted capabilities (${y.adoption.added.slice(0, 3).join(", ")}) and ask who owns them internally.` : "Adoption is steady — ask which area they'd like to roll out next.",
+      "Say 'since last year on Zuper', not 'because of Zuper' — seasonality, hiring and demand also move these numbers.",
+      ...(declines.length ? [`For your awareness (not on the slide): ${declines.map((m) => `${m.label} ${formatYoyChange(m)}`).join("; ")}.`] : []),
+    ],
+    metrics: y.metrics.map((m) => ({ label: m.label, value: `${formatYoyValue(m, m.before)} → ${formatYoyValue(m, m.now)} (${formatYoyChange(m)})`, definition: m.definition, source: "Computed from this account's Zuper records", evidence: "Observed change" as const })),
+    caveats: compactList([
+      `Capabilities count as in use with at least 3 dated records in the window. Last year: ${y.adoption.before.join(", ") || "none"}. Now: ${y.adoption.now.join(", ") || "none"}.`,
+      "Workflow automation counts workflows that exist today and were created by the window's end — ones deleted since aren't visible.",
+      ctx.syncLine,
+    ]),
+  };
+  return w;
+}
+
+function yoyMagnitude(m: YoyMetric): number {
+  return Math.abs(m.unit === "pct" ? m.change * 3 : m.change);
+}
+
+function fmtRange(r: DateRange): string {
+  const f = (d: Date) => d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
+  return `${f(r.start)} – ${f(r.end)}`;
 }
 
 // ---- 4. Growth since go-live -------------------------------------------------------------------------

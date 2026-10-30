@@ -3,6 +3,7 @@
 import { useEffect, useState, use as usePromise } from "react";
 import { Nav } from "@/components/Nav";
 import type { AccountBrief, BriefItem } from "@/lib/reports/accountBrief";
+import { reportTypeName } from "@/lib/reports/reportTypes";
 
 const BRIEF_KEY = "account_brief";
 const HEALTH_STYLE: Record<AccountBrief["health"]["status"], { label: string; cls: string }> = {
@@ -74,8 +75,21 @@ function BriefPanel({
           <p className="leading-relaxed">{brief.businessRead}</p>
           <div className="grid gap-6 sm:grid-cols-3">
             <BriefList title="What's working" items={brief.highlights} tone="text-green-700 dark:text-green-400" />
-            <BriefList title="Risks" items={brief.risks} tone="text-red-700 dark:text-red-400" />
+            <BriefList title="Growth vs last year" items={brief.growth ?? []} tone="text-green-700 dark:text-green-400" />
             <BriefList title="Opportunities" items={brief.opportunities} tone="text-orange-700 dark:text-orange-400" />
+          </div>
+          {(brief.talkingPoints ?? []).length > 0 && (
+            <div>
+              <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-neutral-500">Talking points, in order</h3>
+              <ol className="list-decimal space-y-1.5 pl-5 text-sm">
+                {brief.talkingPoints.map((t) => (
+                  <li key={t}>{t}</li>
+                ))}
+              </ol>
+            </div>
+          )}
+          <div className="rounded-md border border-red-200 p-3 dark:border-red-900">
+            <BriefList title="Risks — for your reference only (on the deck's last slide, not shown to the customer)" items={brief.risks} tone="text-red-700 dark:text-red-400" />
           </div>
           <div className="grid gap-6 sm:grid-cols-2">
             <div>
@@ -297,7 +311,7 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
         </div>
 
         <header className="mb-8 border-b border-neutral-200 pb-6 dark:border-neutral-800">
-          <p className="text-sm uppercase tracking-wide text-neutral-500">{report.type}</p>
+          <p className="text-sm uppercase tracking-wide text-neutral-500">{reportTypeName(report.type)}</p>
           <h1 className="text-2xl font-semibold">{report.customer.name}</h1>
           <p className="text-sm text-neutral-500">
             {new Date(report.periodStart).toLocaleDateString()} – {new Date(report.periodEnd).toLocaleDateString()}

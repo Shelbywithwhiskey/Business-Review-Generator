@@ -16,7 +16,7 @@ import type { RecommendationSignal } from "@/lib/reports/ebrMetrics";
 import type { WebsiteContext } from "@/lib/website";
 import { ZUPER_PRODUCT_KNOWLEDGE } from "@/lib/zuperProductKnowledge";
 
-const SYSTEM_PROMPT = `You are writing content for a Zuper customer business review (QBR/MBR/HBR).
+const SYSTEM_PROMPT = `You are writing content for a Zuper customer business review (monthly, quarterly, half-yearly or yearly).
 You will be given a JSON object of pre-computed metrics. Write only about numbers present in
 that JSON, using them exactly as given — never calculate, round differently, or invent a number.
 If a metric needed to support a claim isn't in the JSON, don't make the claim. Tone: confident,

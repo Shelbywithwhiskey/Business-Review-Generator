@@ -4,6 +4,8 @@ import type { IndustryResult } from "@/lib/reports/industry";
 import type { WebsiteContext } from "@/lib/website";
 import { ZUPER_PRODUCT_KNOWLEDGE } from "@/lib/zuperProductKnowledge";
 import { exclusionModuleLabel, summarizeExclusions } from "@/lib/zuper/testRecords";
+import { formatYoyChange, formatYoyValue, type YearOverYear } from "@/lib/reports/yoy";
+import { periodWordFor } from "@/lib/reports/reportTypes";
 
 // ---------------------------------------------------------------------------
 // Account Brief: the deck's findings read the way an account manager / CSM
@@ -26,13 +28,20 @@ export interface AccountBrief {
   generatedAt: string;
   /** "ai" when Gemini wrote it, "rules" for the deterministic fallback. */
   source: "ai" | "rules";
+  /** e.g. "Quarterly Business Review". */
+  reviewName: string;
   periodLabel: string;
   /** What the business does and how it runs on Zuper. */
   businessRead: string;
   health: { status: BriefHealth; why: string };
   highlights: BriefItem[];
+  /** Growth vs the same period last year (empty when the account wasn't live a year ago). */
+  growth: BriefItem[];
+  /** For the account manager's reference only — never on a customer-facing slide. */
   risks: BriefItem[];
   opportunities: BriefItem[];
+  /** What to say in the meeting, in order. */
+  talkingPoints: string[];
   /** For the account manager — what to do next. */
   nextActions: string[];
   /** Discovery questions to ask in the meeting. */
@@ -43,7 +52,10 @@ export interface AccountBrief {
 
 export interface BriefInput {
   customerName: string;
+  /** e.g. "Quarterly Business Review". */
+  reviewName: string;
   periodLabel: string;
+  yoy: YearOverYear;
   /** The CSM's "About the company" notes. */
   about: string | null;
   website: WebsiteContext | null;
@@ -85,10 +97,22 @@ function facts(input: BriefInput) {
     .filter((c) => !seen.has(c.headline) && seen.add(c.headline))
     .slice(0, 28)
     .map((c) => ({ type: c.tone, area: c.area, finding: c.headline, soWhat: c.detail }));
+  const y = input.yoy;
   return {
     customer: input.customerName,
+    review: input.reviewName,
     period: input.periodLabel,
     aboutCompany: input.about?.trim() || null,
+    yearOverYear: y.eligible
+      ? {
+          comparedWith: "the same period last year",
+          usage: y.metrics.map((m) => ({ metric: m.label, lastYear: formatYoyValue(m, m.before), now: formatYoyValue(m, m.now), change: formatYoyChange(m), better: m.improved })),
+          capabilitiesInUseLastYear: y.adoption.before.length,
+          capabilitiesInUseNow: y.adoption.now.length,
+          newlyAdopted: y.adoption.added,
+          noLongerActive: y.adoption.dropped,
+        }
+      : { notAvailable: y.reason },
     trade: { label: input.industry.label, confidence: input.industry.confidence, howTheseBusinessesRun: input.industry.model, typicalPlays: input.industry.plays.map((p) => `${p.feature}: ${p.why}`) },
     monthsOnZuper: input.monthsOnZuper,
     findings,
@@ -99,17 +123,23 @@ function facts(input: BriefInput) {
   };
 }
 
-const PROMPT = `Write the Account Brief as a JSON object with exactly these keys:
+const PROMPT = `This is for the customer's {REVIEW}. The customer sees positive results only: highlights, growth and opportunities go on slides,
+so phrase them as wins and next steps. Risks are for the account manager's private reference and never shown to the customer.
+
+Write the Account Brief as a JSON object with exactly these keys:
 {
   "businessRead": "2-3 sentences: what this company does and who it serves (from aboutCompany, the website and trade), then how it is actually running on Zuper (from findings and the areas in use).",
   "health": { "status": "healthy" | "steady" | "at_risk", "why": "one sentence grounded in findings" },
-  "highlights": [ { "headline": "max 12 words, with the number", "detail": "one sentence: why this result matters to this business" } ],   // 3-4 wins to celebrate
-  "risks": [ { "headline": "...", "detail": "one sentence: what could go wrong for the account or renewal" } ],                         // 2-3
-  "opportunities": [ { "headline": "...", "detail": "one sentence: the Zuper capability and the evidence for it" } ],                 // 2-3 adoption / expansion plays
-  "nextActions": [ "short imperative for the account manager, e.g. 'Book a Workflow Builder session with the ops lead'" ],          // 3-5
-  "questions": [ "a discovery question to ask the customer in the meeting" ]                                                      // 2-3
+  "highlights": [ { "headline": "max 12 words, with the number", "detail": "one sentence: why this result matters to this business" } ],        // 3-4 wins this period
+  "growth": [ { "headline": "max 12 words, with the change vs last year", "detail": "one sentence: what it means for the business" } ],        // 0-4, ONLY from yearOverYear improvements and newlyAdopted; [] if yearOverYear is notAvailable
+  "risks": [ { "headline": "...", "detail": "one sentence: what could hurt the account or renewal (private)" } ],                               // 2-3
+  "opportunities": [ { "headline": "...", "detail": "one sentence: the Zuper capability and the evidence for it, framed as growth" } ],      // 2-3
+  "talkingPoints": [ "a sentence the account manager can say in the meeting, in running order" ],                                                // 5-7: open with their business and goals, the headline results, the year-over-year story (if any), what it means for them, then set up the opportunities
+  "nextActions": [ "short imperative for the account manager, e.g. 'Book a Workflow Builder session with the ops lead'" ],                       // 3-5
+  "questions": [ "a discovery question to ask the customer in the meeting" ]                                                                   // 2-3
 }
-Use each finding at most once across highlights, risks and opportunities. Tie points to what this business cares about — not generic SaaS advice.`;
+Use each finding at most once across highlights, growth, risks and opportunities. Tie every point to what this business cares about — not generic SaaS advice.
+Talking points should sound like a seasoned account manager: specific, confident, about the customer's business outcomes, never a list of features.`;
 
 function isItems(v: unknown, min: number, max: number): v is BriefItem[] {
   return (
@@ -124,7 +154,7 @@ function isStrings(v: unknown, min: number, max: number): v is string[] {
   return Array.isArray(v) && v.length >= min && v.length <= max && v.every((s) => typeof s === "string" && s.trim());
 }
 
-type AiBrief = Pick<AccountBrief, "businessRead" | "health" | "highlights" | "risks" | "opportunities" | "nextActions" | "questions">;
+type AiBrief = Pick<AccountBrief, "businessRead" | "health" | "highlights" | "growth" | "risks" | "opportunities" | "talkingPoints" | "nextActions" | "questions">;
 
 function isAiBrief(v: unknown): v is AiBrief {
   if (!v || typeof v !== "object") return false;
@@ -136,8 +166,10 @@ function isAiBrief(v: unknown): v is AiBrief {
     (health.status === "healthy" || health.status === "steady" || health.status === "at_risk") &&
     typeof health.why === "string" &&
     isItems(b.highlights, 1, 4) &&
+    isItems(b.growth, 0, 4) &&
     isItems(b.risks, 0, 3) &&
     isItems(b.opportunities, 0, 3) &&
+    isStrings(b.talkingPoints, 3, 8) &&
     isStrings(b.nextActions, 1, 5) &&
     isStrings(b.questions, 0, 3)
   );
@@ -154,10 +186,13 @@ function rulesBrief(input: BriefInput): AiBrief {
   const ranked = [...input.callouts].sort((a, b) => b.score - a.score);
   const seen = new Set<string>();
   const unique = ranked.filter((c) => !seen.has(c.headline) && seen.add(c.headline));
-  const pick = (tones: Callout["tone"][], n: number) => unique.filter((c) => tones.includes(c.tone)).slice(0, n);
+  const isYoy = (c: Callout) => c.area === "Year over year" || c.area === "Adoption";
+  // Wins and opportunities leave the year-over-year call-outs to `growth`; risks include YoY declines.
+  const pick = (tones: Callout["tone"][], n: number, withYoy = false) => unique.filter((c) => tones.includes(c.tone) && (withYoy || !isYoy(c))).slice(0, n);
   const wins = pick(["win"], 4);
-  const risks = pick(["risk"], 3);
-  const watch = pick(["watch"], Math.max(0, 3 - risks.length));
+  const growth = input.yoy.eligible ? unique.filter((c) => isYoy(c) && c.tone === "win").slice(0, 4) : [];
+  const risks = pick(["risk"], 3, true);
+  const watch = pick(["watch"], Math.max(0, 3 - risks.length), true);
   const opps = pick(["opportunity"], 3);
   const item = (c: Callout): BriefItem => ({ headline: c.headline, detail: c.detail.replace(/^./, (s) => s.toUpperCase()) });
 
@@ -179,12 +214,27 @@ function rulesBrief(input: BriefInput): AiBrief {
     opportunities.push({ headline: play.feature, detail: play.why });
   }
 
+  // Text is kept as written (no case changes) so product names like "Zuper Pay" survive.
+  const clean = (s: string) => s.trim().replace(/\.$/, "");
+  const period = periodWordFor(input.reviewName);
+  const talkingPoints = [
+    input.about?.trim()
+      ? `Open with their business: ${clean(firstSentences(input.about, 1))} — and confirm what matters most to them this ${period}.`
+      : `Open by asking what matters most to the business right now, then frame this ${input.reviewName} around it.`,
+    ...wins.slice(0, 2).map((c) => `Headline result: ${clean(c.headline)} — ${clean(c.detail)}.`),
+    ...growth.slice(0, 2).map((c) => `Year-over-year story: ${clean(c.headline)} (${clean(c.detail)}).`),
+    ...opportunities.slice(0, 2).map((o) => `Set up what's next: ${clean(o.headline)} — ${clean(o.detail)}.`),
+    "Close by agreeing two or three goals for the next period and how you'll measure them together in Zuper.",
+  ].slice(0, 7);
+
   return {
     businessRead,
     health: { status, why: `${winCount} wins and ${riskCount} risks were flagged across the account this period.` },
     highlights: wins.map(item),
+    growth: growth.map(item),
     risks: [...risks, ...watch].map(item),
     opportunities,
+    talkingPoints,
     nextActions: [
       ...[...risks, ...watch].slice(0, 2).map((c) => `Agree an owner and a fix with the customer for: ${c.headline.replace(/\.$/, "")}`),
       ...opps.slice(0, 2).map((c) => `Propose a next step on: ${c.headline.replace(/\.$/, "")}`),
@@ -203,10 +253,10 @@ export async function buildAccountBrief(input: BriefInput): Promise<AccountBrief
   const website = input.website
     ? `\n\nHow the business describes itself on its website (framing only):\n${JSON.stringify({ title: input.website.title, description: input.website.description, excerpt: input.website.excerpt.slice(0, 1500) })}`
     : "";
-  const ai = await generateCheckedJson(SYSTEM, `${PROMPT}${website}\n\nFACTS:\n${JSON.stringify(f, null, 2)}`, f, isAiBrief, {
+  const ai = await generateCheckedJson(SYSTEM, `${PROMPT.replace("{REVIEW}", input.reviewName)}${website}\n\nFACTS:\n${JSON.stringify(f, null, 2)}`, f, isAiBrief, {
     maxOutputTokens: 8000,
     thinkingBudget: 2048,
   });
-  if (ai) return { ...base, source: "ai", ...ai };
-  return { ...base, source: "rules", ...rulesBrief(input) };
+  if (ai) return { ...base, reviewName: input.reviewName, source: "ai", ...ai };
+  return { ...base, reviewName: input.reviewName, source: "rules", ...rulesBrief(input) };
 }

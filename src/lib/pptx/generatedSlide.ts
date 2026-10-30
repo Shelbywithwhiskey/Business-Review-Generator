@@ -54,6 +54,11 @@ export function run(text: string, { sz, color, bold }: { sz: number; color: stri
 
 const TONE_COLORS: Record<Tone, string> = { win: "0B7A0B", risk: "B5271C", opportunity: "FD5000", watch: "4B5563" };
 
+/** Slides show positive findings only; risks and watch items go to the closing reference slide. */
+export function isPositive(c: Callout): boolean {
+  return c.tone === "win" || c.tone === "opportunity";
+}
+
 export class ShapeWriter {
   private nextId: number;
   readonly shapes: string[] = [];
@@ -81,8 +86,13 @@ export class ShapeWriter {
     return { x: x + 120000, y: y + 420000, cx: cx - 240000, cy: cy - 520000 };
   }
 
-  /** Row of KPI tiles across the content width. A tile with `spark` gets a small trend line under its label. */
+  /**
+   * Row of KPI tiles across the content width. A tile with `spark` gets a small trend line under its label.
+   * `alert` is accepted but no longer drawn in red: slides present positively, and the matching risk
+   * call-out lands on the closing reference slide.
+   */
   kpis(y: number, tiles: { value: string; label: string; alert?: boolean; spark?: number[] }[], h = 820000) {
+    tiles = tiles.map((t) => ({ ...t, alert: false }));
     const gap = 130000;
     const w = (CONTENT_W - gap * (tiles.length - 1)) / tiles.length;
     tiles.forEach((t, i) => {
@@ -217,10 +227,11 @@ export class ShapeWriter {
 
   /**
    * "KEY CALL-OUTS" strip along the bottom (same footprint as the insight bar): the top 3 ranked
-   * call-outs, each tagged WIN / RISK / OPPORTUNITY / WATCH. Falls back to a plain insight line.
+   * positive call-outs (WIN / OPPORTUNITY). Every call-out, risks included, is still recorded for the
+   * speaker notes, the Account Brief and the closing reference slide. Falls back to a plain insight line.
    */
   keyCallouts(list: Callout[], fallback: string) {
-    const top = rank(list).slice(0, 3);
+    const top = rank(list).filter(isPositive).slice(0, 3);
     this.callouts = rank(list);
     if (!top.length) return this.insight(fallback);
     const y = 5840000;
@@ -236,9 +247,9 @@ export class ShapeWriter {
     });
   }
 
-  /** Bordered card listing call-outs with full text — for template slides with free space. */
+  /** Bordered card listing positive call-outs with full text — for template slides with free space. */
   calloutPanel(x: number, y: number, cx: number, cy: number, list: Callout[], max = 3) {
-    const top = rank(list).slice(0, max);
+    const top = rank(list).filter(isPositive).slice(0, max);
     if (!top.length) return;
     this.rect(x, y, cx, cy, COLORS.white, { radius: 6000, border: COLORS.border });
     this.text(x + 180000, y + 110000, cx - 360000, 220000, run("KEY CALL-OUTS", { sz: 950, color: COLORS.orange, bold: true }), { wrap: "none" });

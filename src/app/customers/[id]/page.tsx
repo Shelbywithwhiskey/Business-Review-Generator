@@ -4,6 +4,7 @@ import { useEffect, useState, use as usePromise } from "react";
 import { useRouter } from "next/navigation";
 import { Nav } from "@/components/Nav";
 import { exclusionModuleLabel } from "@/lib/zuper/testRecords";
+import { REPORT_TYPES, REPORT_TYPE_ORDER, defaultPeriod, type ReportTypeKey } from "@/lib/reports/reportTypes";
 
 interface Customer {
   id: string;
@@ -26,18 +27,6 @@ interface StepResponse {
   error?: string;
 }
 
-const REPORT_TYPE_LABELS: Record<string, string> = {
-  QBR: "Quarterly (QBR)",
-  MBR: "Monthly (MBR)",
-  HBR: "Half-Year (HBR)",
-};
-
-function defaultPeriod() {
-  const end = new Date();
-  const start = new Date();
-  start.setMonth(start.getMonth() - 3);
-  return { start: start.toISOString().slice(0, 10), end: end.toISOString().slice(0, 10) };
-}
 
 export default function CustomerDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = usePromise(params);
@@ -48,7 +37,7 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
   const [testingKey, setTestingKey] = useState(false);
   const [verifyResult, setVerifyResult] = useState<string | null>(null);
   const [credentialError, setCredentialError] = useState<string | null>(null);
-  const [period, setPeriod] = useState(defaultPeriod());
+  const [period, setPeriod] = useState(defaultPeriod("QBR"));
   const [syncing, setSyncing] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
   const [syncProgress, setSyncProgress] = useState<{ done: number; total: number; label: string } | null>(null);
@@ -58,7 +47,14 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
   const [website, setWebsite] = useState("");
   const [about, setAbout] = useState("");
   const [savingWebsite, setSavingWebsite] = useState(false);
-  const [reportType, setReportType] = useState<"QBR" | "MBR" | "HBR">("QBR");
+  const [reportType, setReportType] = useState<ReportTypeKey>("QBR");
+
+  /** The review type sets the period (last month / quarter / half-year / year); dates stay editable. */
+  function chooseReportType(type: ReportTypeKey) {
+    setReportType(type);
+    setPeriod(defaultPeriod(type));
+    setMetrics(null);
+  }
 
   async function loadCustomer() {
     const res = await fetch(`/api/customers/${id}`);
@@ -300,6 +296,20 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
           <h2 className="mb-3 font-medium">Analyze account</h2>
           <div className="mb-3 flex flex-wrap items-end gap-3">
             <div>
+              <label className="mb-1 block text-xs text-neutral-500">Review</label>
+              <select
+                value={reportType}
+                onChange={(e) => chooseReportType(e.target.value as ReportTypeKey)}
+                className="rounded-md border border-neutral-300 px-2 py-1.5 text-sm dark:border-neutral-700 dark:bg-neutral-900"
+              >
+                {REPORT_TYPE_ORDER.map((t) => (
+                  <option key={t} value={t}>
+                    {REPORT_TYPES[t].name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
               <label className="mb-1 block text-xs text-neutral-500">From</label>
               <input
                 type="date"
@@ -434,7 +444,7 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
             </div>
 
             <div className="mt-6 rounded-md border border-indigo-200 bg-indigo-50 p-4 text-sm dark:border-indigo-900 dark:bg-indigo-950">
-              <h3 className="mb-2 font-medium text-indigo-900 dark:text-indigo-200">Key insights for this QBR</h3>
+              <h3 className="mb-2 font-medium text-indigo-900 dark:text-indigo-200">Key insights for this {REPORT_TYPES[reportType].name}</h3>
               <ul className="space-y-1 text-indigo-800 dark:text-indigo-300">
                 {metrics.current.insights.powerTechnician && (
                   <li>
@@ -477,23 +487,12 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
             </div>
 
             <div className="mt-5 flex items-center gap-2">
-              <select
-                value={reportType}
-                onChange={(e) => setReportType(e.target.value as "QBR" | "MBR" | "HBR")}
-                className="rounded-md border border-neutral-300 px-2 py-2 text-sm dark:border-neutral-700 dark:bg-neutral-900"
-              >
-                {Object.entries(REPORT_TYPE_LABELS).map(([value, label]) => (
-                  <option key={value} value={value}>
-                    {label}
-                  </option>
-                ))}
-              </select>
               <button
                 onClick={generateReport}
-                disabled={generatingReport}
+                disabled={generatingReport || !syncReady}
                 className="rounded-md bg-neutral-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-neutral-100 dark:text-neutral-900"
               >
-                {generatingReport ? "Generating report…" : `Generate ${reportType}`}
+                {generatingReport ? "Generating…" : `Generate ${REPORT_TYPES[reportType].name}`}
               </button>
             </div>
           </section>

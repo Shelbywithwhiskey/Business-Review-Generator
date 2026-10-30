@@ -11,7 +11,7 @@ export const maxDuration = 300;
 const schema = z.object({
   periodStart: z.string(),
   periodEnd: z.string(),
-  type: z.enum(["QBR", "MBR", "HBR"]).default("QBR"),
+  type: z.enum(["MBR", "QBR", "HBR", "YBR"]).default("QBR"),
 });
 
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {

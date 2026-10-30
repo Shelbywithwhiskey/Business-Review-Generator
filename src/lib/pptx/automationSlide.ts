@@ -40,8 +40,9 @@ function drawKpis(w: ShapeWriter, s: WorkflowSummary) {
     { value: s.live, label: "Live (active & published)" },
     { value: s.ranInPeriod, label: "Live workflows that ran this period" },
     { value: s.liveSteps, label: "Automated steps in live workflows" },
-    { value: s.needsAttention, label: "Flagged as needing attention", alert: s.needsAttention > 0 },
-  ];
+    // Slides show positive data; workflows needing attention are a risk call-out on the reference slide.
+    { value: s.workflows.length, label: "Workflows built in Zuper" },
+  ] as { value: number; label: string; alert?: boolean }[];
   const tileW = (CONTENT_W - KPI_GAP * (tiles.length - 1)) / tiles.length;
   tiles.forEach((t, i) => {
     const x = CONTENT_X + i * (tileW + KPI_GAP);
@@ -90,10 +91,7 @@ function drawWorkflowList(w: ShapeWriter, x: number, s: WorkflowSummary) {
       plural(wf.stepCount, "step"),
       wf.lastExecutionTime ? `last run ${fmtShortDate(wf.lastExecutionTime)}` : "never run",
     ].join("  ·  ");
-    const detailRuns =
-      run(truncate(detail, 52), { sz: 850, color: COLORS.muted }) +
-      (wf.needsAttention ? run("  ·  needs attention", { sz: 850, color: COLORS.alert, bold: true }) : "");
-    w.text(innerX, y + 230000, innerW, 200000, detailRuns, { wrap: "none" });
+    w.text(innerX, y + 230000, innerW, 200000, run(truncate(detail, 52), { sz: 850, color: COLORS.muted }), { wrap: "none" });
   });
   if (rows.length > shown.length) {
     w.text(innerX, CARD_Y + CARD_H - 230000, innerW, 180000, run(`+ ${fmtInt(rows.length - shown.length)} more`, { sz: 850, color: COLORS.faint }));
@@ -114,7 +112,7 @@ export function automationInsight(s: WorkflowSummary): string {
   const topTrigger = s.triggers[0];
   if (topTrigger) parts.push(`the most common starting point is "${topTrigger.name}" (${plural(topTrigger.count, "workflow")})`);
   if (s.webhookTriggered > 0) parts.push(`${plural(s.webhookTriggered, "workflow")} ${s.webhookTriggered === 1 ? "is" : "are"} triggered by other systems via webhook`);
-  if (s.needsAttention > 0) parts.push(`${plural(s.needsAttention, "workflow")} ${s.needsAttention === 1 ? "needs" : "need"} attention`);
+  // Workflows needing attention are left to the risk call-out (closing reference slide), not this slide line.
   if (s.drafts > 0) parts.push(`${fmtInt(s.drafts)} more ${s.drafts === 1 ? "is" : "are"} still in draft`);
   return `${parts.join("; ")}.`;
 }

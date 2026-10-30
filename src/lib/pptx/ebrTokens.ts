@@ -25,6 +25,7 @@ import {
 import { computeCatalogAnalyses, computeJobServiceDelivery, type JobServiceDelivery, type ModuleAnalysis } from "@/lib/reports/catalogMetrics";
 import { momentum, rank, type Callout } from "@/lib/reports/callouts";
 import { computeJourney, type Journey } from "@/lib/reports/journey";
+import { computeYearOverYear, type YearOverYear } from "@/lib/reports/yoy";
 import type { WebsiteContext } from "@/lib/website";
 import { generateBusinessRecommendations } from "@/lib/ai";
 import { fetchWebsiteContext } from "@/lib/website";
@@ -105,11 +106,13 @@ export interface SharedDeckData {
   exec: ExecutionDeepDive;
   sync: SyncInfo;
   journey: Journey;
+  /** This period vs the same period last year (eligible only when the account was live then). */
+  yoy: YearOverYear;
   website: WebsiteContext | null;
 }
 
 export async function computeSharedDeckData(customerId: string, range: DateRange, customerWebsite: string | null = null): Promise<SharedDeckData> {
-  const [catalog, delivery, jobsDeep, quotesDeep, exec, sync, journey, website] = await Promise.all([
+  const [catalog, delivery, jobsDeep, quotesDeep, exec, sync, journey, yoy, website] = await Promise.all([
     computeCatalogAnalyses(customerId, range),
     computeJobServiceDelivery(customerId, range),
     computeJobDeepDive(customerId, range),
@@ -117,9 +120,10 @@ export async function computeSharedDeckData(customerId: string, range: DateRange
     computeExecutionDeepDive(customerId, range),
     computeSyncInfo(customerId, range),
     computeJourney(customerId, range),
+    computeYearOverYear(customerId, range),
     customerWebsite ? fetchWebsiteContext(customerWebsite) : Promise.resolve(null),
   ]);
-  return { catalog, delivery, jobsDeep, quotesDeep, exec, sync, journey, website };
+  return { catalog, delivery, jobsDeep, quotesDeep, exec, sync, journey, yoy, website };
 }
 
 export async function buildEbrTokenData(
