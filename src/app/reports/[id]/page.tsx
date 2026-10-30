@@ -31,14 +31,26 @@ function BriefList({ title, items, tone }: { title: string; items: BriefItem[]; 
   );
 }
 
-function BriefPanel({ brief, busy, error, onGenerate }: { brief: AccountBrief | null; busy: boolean; error: string | null; onGenerate: () => void }) {
+function BriefPanel({
+  brief,
+  busy,
+  disabled,
+  error,
+  onGenerate,
+}: {
+  brief: AccountBrief | null;
+  busy: boolean;
+  disabled: boolean;
+  error: string | null;
+  onGenerate: () => void;
+}) {
   return (
     <section className="mb-10 rounded-lg border border-neutral-200 p-5 dark:border-neutral-800">
       <div className="mb-3 flex items-center justify-between gap-3">
         <h2 className="text-lg font-semibold">Account Brief</h2>
         <button
           onClick={onGenerate}
-          disabled={busy}
+          disabled={busy || disabled}
           className="no-print rounded-md border border-neutral-300 px-3 py-1.5 text-sm disabled:opacity-50 dark:border-neutral-700"
         >
           {busy ? "Building… (up to a minute)" : brief ? "Refresh brief" : "Generate brief"}
@@ -195,11 +207,16 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
   const [saving, setSaving] = useState<string | null>(null);
   const [briefBusy, setBriefBusy] = useState(false);
   const [briefError, setBriefError] = useState<string | null>(null);
+  // The deck and brief need a finished sync of the customer's data.
+  const [sync, setSync] = useState<{ ready: boolean; reason?: string }>({ ready: true });
 
   function loadReport() {
     return fetch(`/api/reports/${id}`)
       .then((r) => r.json())
-      .then((d) => setReport(d.report));
+      .then((d) => {
+        setReport(d.report);
+        if (d.sync) setSync(d.sync);
+      });
   }
 
   useEffect(() => {
@@ -253,13 +270,24 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
         <Nav />
       </div>
       <main className="mx-auto max-w-3xl px-6 py-10">
+        {!sync.ready && (
+          <p className="no-print mb-3 rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:bg-amber-950 dark:text-amber-300">
+            {sync.reason} The deck and Account Brief unlock once the customer&apos;s sync has completed.
+          </p>
+        )}
         <div className="no-print mb-6 flex justify-end gap-2">
-          <a
-            href={`/api/reports/${id}/export/ebr-pptx`}
-            className="rounded-md bg-neutral-900 px-3 py-1.5 text-sm font-medium text-white dark:bg-neutral-100 dark:text-neutral-900"
-          >
-            Download EBR (PPTX)
-          </a>
+          {sync.ready ? (
+            <a
+              href={`/api/reports/${id}/export/ebr-pptx`}
+              className="rounded-md bg-neutral-900 px-3 py-1.5 text-sm font-medium text-white dark:bg-neutral-100 dark:text-neutral-900"
+            >
+              Download EBR (PPTX)
+            </a>
+          ) : (
+            <span className="cursor-not-allowed rounded-md bg-neutral-900 px-3 py-1.5 text-sm font-medium text-white opacity-50 dark:bg-neutral-100 dark:text-neutral-900">
+              Download EBR (PPTX)
+            </span>
+          )}
           <button
             onClick={() => window.print()}
             className="rounded-md border border-neutral-300 px-3 py-1.5 text-sm dark:border-neutral-700"
@@ -279,6 +307,7 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
         <BriefPanel
           brief={(report.sections.find((s) => s.sectionKey === BRIEF_KEY)?.contentJson as AccountBrief | undefined) ?? null}
           busy={briefBusy}
+          disabled={!sync.ready}
           error={briefError}
           onGenerate={generateBrief}
         />

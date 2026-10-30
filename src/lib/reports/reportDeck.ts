@@ -2,6 +2,10 @@ import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { generateEbrPptx } from "@/lib/pptx/ebrExport";
 import type { AccountBrief } from "@/lib/reports/accountBrief";
+import { syncReadiness } from "@/lib/zuper/sync";
+
+/** The customer's data isn't in a finished state (no completed sync, or one still running). */
+export class SyncNotReadyError extends Error {}
 
 export const BRIEF_SECTION_KEY = "account_brief";
 
@@ -21,6 +25,8 @@ export async function buildReportDeck(reportId: string): Promise<{ buffer: Buffe
     include: { customer: { select: { id: true, name: true, website: true, notes: true, testExclusions: true } } },
   });
   if (!report) return null;
+  const readiness = await syncReadiness(report.customer.id);
+  if (!readiness.ready) throw new SyncNotReadyError(readiness.reason);
 
   const { buffer, brief } = await generateEbrPptx({
     customerId: report.customer.id,

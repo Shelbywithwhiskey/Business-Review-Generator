@@ -79,7 +79,13 @@ export interface ModuleExclusion {
   count: number;
   /** A few reasons/examples, for the report notes. */
   examples: string[];
+  /** Excluded invoice uids only — a later sync step drops payments made against them. */
+  uids?: string[];
 }
+
+/** Modules whose excluded uids are kept on the Customer for a later step. */
+const KEEP_UIDS = new Set(["invoices"]);
+const MAX_KEPT_UIDS = 5000;
 
 export interface TestExclusions {
   updatedAt: string;
@@ -108,10 +114,33 @@ export class ExclusionLog {
     this.modules[module] ??= { count: 0, examples: [] };
   }
 
-  mergeInto(previous: unknown): TestExclusions {
-    const prev = previous && typeof previous === "object" && "modules" in previous ? (previous as TestExclusions).modules : {};
-    return { updatedAt: new Date().toISOString(), modules: { ...prev, ...this.modules } };
+  /**
+   * The stored summary with this log applied. A module's entry replaces the stored one, except for
+   * modules in `continuing` (a sync step resuming that module mid-way), whose counts are added.
+   */
+  mergeInto(previous: unknown, continuing: ReadonlySet<string> = new Set()): TestExclusions {
+    const prev = storedModules(previous);
+    const modules: Record<string, ModuleExclusion> = { ...prev };
+    for (const [key, cur] of Object.entries(this.modules)) {
+      const before = continuing.has(key) ? prev[key] : undefined;
+      const uids = KEEP_UIDS.has(key) ? [...(before?.uids ?? []), ...this.excludedUids(key)].slice(0, MAX_KEPT_UIDS) : undefined;
+      modules[key] = {
+        count: (before?.count ?? 0) + cur.count,
+        examples: [...new Set([...(before?.examples ?? []), ...cur.examples])].slice(0, 5),
+        ...(uids ? { uids } : {}),
+      };
+    }
+    return { updatedAt: new Date().toISOString(), modules };
   }
+}
+
+function storedModules(value: unknown): Record<string, ModuleExclusion> {
+  return value && typeof value === "object" && "modules" in value ? (value as TestExclusions).modules : {};
+}
+
+/** Excluded uids a sync step stored for a module (see KEEP_UIDS). */
+export function storedExcludedUids(value: unknown, module: string): string[] {
+  return storedModules(value)[module]?.uids ?? [];
 }
 
 /** The real records of a page; test records are logged (with their uid) and dropped. */
@@ -147,8 +176,7 @@ export function exclusionModuleLabel(module: string): string {
 
 /** Total records excluded and the modules they came from, e.g. for a report line. */
 export function summarizeExclusions(value: unknown): { total: number; byModule: { module: string; count: number; examples: string[] }[] } {
-  const modules = value && typeof value === "object" && "modules" in value ? (value as TestExclusions).modules : {};
-  const byModule = Object.entries(modules)
+  const byModule = Object.entries(storedModules(value))
     .filter(([, m]) => m.count > 0)
     .map(([module, m]) => ({ module, count: m.count, examples: m.examples }))
     .sort((a, b) => b.count - a.count);

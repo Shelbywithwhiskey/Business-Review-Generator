@@ -16,6 +16,16 @@ interface Customer {
   syncRuns: { id: string; status: string; periodStart: string; periodEnd: string; errorMessage: string | null; createdAt: string }[];
 }
 
+/** /api/customers/[id]/sync/step response (success fields, or error fields). */
+interface StepResponse {
+  syncRunId?: string;
+  cursor?: { step: number; page: number } | null;
+  done?: number;
+  total?: number;
+  label?: string;
+  error?: string;
+}
+
 const REPORT_TYPE_LABELS: Record<string, string> = {
   QBR: "Quarterly (QBR)",
   MBR: "Monthly (MBR)",
@@ -41,7 +51,7 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
   const [period, setPeriod] = useState(defaultPeriod());
   const [syncing, setSyncing] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
-  const [syncStage, setSyncStage] = useState<string | null>(null);
+  const [syncProgress, setSyncProgress] = useState<{ done: number; total: number; label: string } | null>(null);
   const [metrics, setMetrics] = useState<any | null>(null);
   const [loadingMetrics, setLoadingMetrics] = useState(false);
   const [generatingReport, setGeneratingReport] = useState(false);
@@ -96,48 +106,80 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
     await loadCustomer();
   }
 
+  // Closing the tab mid-sync stops it (the page drives it), so warn first.
+  useEffect(() => {
+    if (!syncing) return;
+    const warn = (e: BeforeUnloadEvent) => e.preventDefault();
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [syncing]);
+
+  /**
+   * Drives the step-based sync: each call works for up to ~4 minutes and returns where to resume.
+   * A failed call is retried from the same point (safe — every step rewrites its own records).
+   */
   async function runSync() {
     setSyncing(true);
     setSyncError(null);
-    setSyncStage("Step 1 of 2: core modules (jobs, quotes, invoices, payments, customers, team, workflows)…");
-    const body = { apiKey, periodStart: period.start, periodEnd: period.end };
-    const res = await fetch(`/api/customers/${id}/sync`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      setSyncError(data.error ?? "Sync failed");
-      setSyncing(false);
-      setSyncStage(null);
-      await loadCustomer();
-      return;
-    }
-
-    // Step 2: every other module Zuper exposes, in chunks that each fit the server time limit.
-    let startIndex: number | null = 0;
-    let found = 0;
-    while (startIndex != null) {
-      setSyncStage(`Step 2 of 2: all other Zuper modules (${startIndex} done${found ? `, ${found} with data` : ""})…`);
-      const r: Response = await fetch(`/api/customers/${id}/sync/catalog`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...body, startIndex }),
-      });
-      const data = await r.json().catch(() => ({}));
-      if (!r.ok) {
-        setSyncError(`Core sync finished, but pulling the other modules failed: ${data.error ?? r.status}. Re-sync to retry.`);
+    setMetrics(null);
+    setSyncProgress({ done: 0, total: 1, label: "Starting" });
+    let syncRunId: string | undefined;
+    let cursor: { step: number; page: number } | undefined;
+    let label = "Starting";
+    let failures = 0;
+    let ok = false;
+    while (true) {
+      let res: Response | null = null;
+      let data: StepResponse = {};
+      try {
+        res = await fetch(`/api/customers/${id}/sync/step`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ apiKey, periodStart: period.start, periodEnd: period.end, syncRunId, cursor }),
+        });
+        data = await res.json().catch(() => ({}));
+      } catch {
+        // network drop — retried below
+      }
+      if (res?.ok) {
+        failures = 0;
+        syncRunId = data.syncRunId;
+        label = data.label ?? label;
+        setSyncProgress({ done: data.done ?? 0, total: data.total ?? 1, label });
+        if (!data.cursor) {
+          ok = true;
+          break;
+        }
+        cursor = data.cursor;
+        continue;
+      }
+      if (res && (res.status === 400 || res.status === 422)) {
+        setSyncError(data.error ?? "Sync failed");
         break;
       }
-      found += (data.results ?? []).filter((x: { status: string }) => x.status === "ok").length;
-      startIndex = data.nextIndex;
+      syncRunId ??= data.syncRunId;
+      if (syncRunId && !cursor) cursor = { step: 0, page: 1 };
+      failures += 1;
+      if (failures > 3) {
+        const reason = data.error ?? "the server didn't respond";
+        if (syncRunId) {
+          await fetch(`/api/customers/${id}/sync/step`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ apiKey, syncRunId, abort: `Stopped at ${label}: ${reason}` }),
+          }).catch(() => {});
+        }
+        setSyncError(`Sync stopped at ${label} after 3 retries: ${reason}. Run the sync again.`);
+        break;
+      }
+      setSyncProgress((p) => (p ? { ...p, label: `${label} — retrying (${failures} of 3)` } : p));
+      await new Promise((r) => setTimeout(r, 3000 * failures));
     }
     setSyncing(false);
-    setSyncStage(null);
-    setApiKey("");
+    setSyncProgress(null);
+    if (ok) setApiKey("");
     await loadCustomer();
-    await loadMetrics();
+    if (ok) await loadMetrics();
   }
 
   async function loadMetrics() {
@@ -173,6 +215,8 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
   }
 
   const latestSync = customer.syncRuns[0];
+  // Metrics and reports only from a finished sync (the server enforces this too).
+  const syncReady = !syncing && latestSync?.status === "SUCCESS";
   const excluded = Object.entries(customer.testExclusions?.modules ?? {}).filter(([, m]) => m.count > 0);
 
   return (
@@ -278,25 +322,45 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
               disabled={syncing || !apiKey}
               className="rounded-md bg-neutral-900 px-3 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-neutral-100 dark:text-neutral-900"
             >
-              {syncing ? "Syncing… (this can take a bit)" : "Sync from Zuper"}
+              {syncing ? "Syncing…" : "Sync from Zuper"}
             </button>
             <button
               onClick={loadMetrics}
-              disabled={loadingMetrics}
-              className="rounded-md border border-neutral-300 px-3 py-2 text-sm dark:border-neutral-700"
+              disabled={loadingMetrics || !syncReady}
+              title={syncReady ? undefined : "Available once a sync has completed"}
+              className="rounded-md border border-neutral-300 px-3 py-2 text-sm disabled:opacity-50 dark:border-neutral-700"
             >
               {loadingMetrics ? "Loading…" : "Load metrics"}
             </button>
           </div>
-          {syncStage && <p className="text-sm text-neutral-500">{syncStage}</p>}
+          {syncProgress && (
+            <div className="mb-2" role="status">
+              <div className="mb-1 flex justify-between text-sm text-neutral-600 dark:text-neutral-400">
+                <span>Syncing: {syncProgress.label}</span>
+                <span>{Math.round((syncProgress.done / Math.max(syncProgress.total, 1)) * 100)}%</span>
+              </div>
+              <div className="h-2 rounded bg-neutral-200 dark:bg-neutral-800">
+                <div
+                  className="h-2 rounded bg-orange-600 transition-all"
+                  style={{ width: `${Math.max(3, (syncProgress.done / Math.max(syncProgress.total, 1)) * 100)}%` }}
+                />
+              </div>
+              <p className="mt-1 text-xs text-neutral-500">Keep this tab open until it finishes. Large accounts can take several minutes.</p>
+            </div>
+          )}
           {!apiKey && !syncing && <p className="text-sm text-amber-600">Enter the Zuper API key above to sync.</p>}
           {syncError && <p className="text-sm text-red-500">{syncError}</p>}
-          {latestSync && (
+          {latestSync && !syncing && (
             <p className="text-sm text-neutral-500">
-              Last sync: {latestSync.status}
-              {latestSync.errorMessage ? ` — ${latestSync.errorMessage}` : ""}
+              {latestSync.status === "SUCCESS"
+                ? `Synced (started ${new Date(latestSync.createdAt).toLocaleString()}) — metrics and reports are ready.`
+                : latestSync.status === "RUNNING"
+                  ? "A sync is in progress (or was interrupted). Run the sync again to finish it."
+                  : "The last sync didn't finish — run the sync again before loading metrics or reports."}
+              {latestSync.errorMessage ? ` (${latestSync.errorMessage})` : ""}
             </p>
           )}
+          {!latestSync && !syncing && <p className="text-sm text-neutral-500">Not synced yet — metrics and reports unlock after the first sync.</p>}
           {excluded.length > 0 && (
             <details className="text-sm text-neutral-500">
               <summary className="cursor-pointer">

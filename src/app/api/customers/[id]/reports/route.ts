@@ -4,6 +4,7 @@ import { prisma } from "@/lib/db";
 import { getOrCreateDefaultTemplate, DEFAULT_QBR_SECTIONS } from "@/lib/templates";
 import { computeComparison, computeHealthScore, computeLineItemUsage, evaluateRules } from "@/lib/analytics";
 import { generateExecutiveSummary, generateSectionNarrative, generateRecommendation } from "@/lib/ai";
+import { syncReadiness } from "@/lib/zuper/sync";
 
 export const maxDuration = 300;
 
@@ -18,6 +19,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   const body = await req.json();
   const parsed = schema.safeParse(body);
   if (!parsed.success) return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
+  const readiness = await syncReadiness(customerId);
+  if (!readiness.ready) return NextResponse.json({ error: readiness.reason }, { status: 409 });
 
   const range = { start: new Date(parsed.data.periodStart), end: new Date(parsed.data.periodEnd) };
   const template = await getOrCreateDefaultTemplate();

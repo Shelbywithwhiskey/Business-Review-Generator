@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { del, issueSignedToken, list, presignUrl, put } from "@vercel/blob";
-import { buildReportDeck } from "@/lib/reports/reportDeck";
+import { SyncNotReadyError, buildReportDeck } from "@/lib/reports/reportDeck";
 
 // Large accounts (tens of thousands of synced records) need more than a minute to assemble the deck.
 export const maxDuration = 300;
@@ -17,6 +17,7 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
     // Also refreshes the report's Account Brief, so the page and the deck match.
     deck = await buildReportDeck(id);
   } catch (err) {
+    if (err instanceof SyncNotReadyError) return NextResponse.json({ error: err.message }, { status: 409 });
     console.error(`EBR export failed for report ${id}`, err);
     return NextResponse.json({ error: `Could not build the deck: ${err instanceof Error ? err.message : String(err)}` }, { status: 500 });
   }

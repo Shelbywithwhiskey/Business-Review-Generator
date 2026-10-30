@@ -66,11 +66,26 @@ interface ListEnvelope<T> {
 }
 
 export class ZuperClient {
+  /**
+   * Resumable paging for the step-based sync (sync.ts): paginate() starts at `startPage` and, once
+   * `stopAfter` (epoch ms) has passed, stops before fetching the next page and sets `stoppedAtPage`
+   * to it. Null = read every page in one go.
+   */
+  pageWindow: { startPage: number; stopAfter: number } | null = null;
+  stoppedAtPage: number | null = null;
+
   constructor(
     private apiKey: string,
     /** Must already include the /api suffix — see discoverZuperBaseUrl. */
     private baseUrl: string
   ) {}
+
+  /** True (and records where to resume) when the page window's time is up. */
+  private timeUp(nextPage: number): boolean {
+    if (!this.pageWindow || Date.now() < this.pageWindow.stopAfter) return false;
+    this.stoppedAtPage = nextPage;
+    return true;
+  }
 
   private async request<T>(
     path: string,
@@ -128,7 +143,7 @@ export class ZuperClient {
     baseParams: Record<string, string | number | undefined> = {},
     pageSize = 200
   ): AsyncGenerator<T[]> {
-    let page = 1;
+    let page = this.pageWindow?.startPage ?? 1;
     while (true) {
       // Most endpoints read `count`; Workflow Builder reads `limit` instead — send both, harmless either way.
       const res = await this.request<ListEnvelope<T>>(path, { ...baseParams, page, count: pageSize, limit: pageSize });
@@ -138,6 +153,7 @@ export class ZuperClient {
       const totalPages = res.total_pages ?? page;
       if (page >= totalPages || items.length < pageSize) return;
       page += 1;
+      if (this.timeUp(page)) return;
     }
   }
 
@@ -148,7 +164,7 @@ export class ZuperClient {
     baseParams: Record<string, string | number | undefined> = {},
     pageSize = 200
   ): AsyncGenerator<T[]> {
-    let page = 1;
+    let page = this.pageWindow?.startPage ?? 1;
     while (true) {
       const res = await this.request<{ data: Record<string, unknown>; total_pages?: number }>(path, {
         ...baseParams,
@@ -161,6 +177,7 @@ export class ZuperClient {
       const totalPages = res.total_pages ?? page;
       if (page >= totalPages || items.length < pageSize) return;
       page += 1;
+      if (this.timeUp(page)) return;
     }
   }
 
