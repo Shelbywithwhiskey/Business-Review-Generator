@@ -48,6 +48,40 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
   const [about, setAbout] = useState("");
   const [savingWebsite, setSavingWebsite] = useState(false);
   const [reportType, setReportType] = useState<ReportTypeKey>("QBR");
+  // Free-up-storage actions: which one is awaiting its second click, and the outcome.
+  const [confirming, setConfirming] = useState<"clear" | "delete" | null>(null);
+  const [freeing, setFreeing] = useState(false);
+  const [freeMessage, setFreeMessage] = useState<{ ok: boolean; text: string } | null>(null);
+
+  async function clearData() {
+    setFreeing(true);
+    setFreeMessage(null);
+    const res = await fetch(`/api/customers/${id}/data`, { method: "DELETE" });
+    const data = await res.json().catch(() => ({}));
+    setFreeing(false);
+    setConfirming(null);
+    if (!res.ok) {
+      setFreeMessage({ ok: false, text: data.error ?? "Couldn't clear the data. Try again." });
+      return;
+    }
+    setMetrics(null);
+    setFreeMessage({ ok: true, text: `Cleared ${Number(data.removed ?? 0).toLocaleString("en-US")} stored records. The customer and its settings are kept — run Sync when you need a new review.` });
+    await loadCustomer();
+  }
+
+  async function deleteCustomer() {
+    setFreeing(true);
+    setFreeMessage(null);
+    const res = await fetch(`/api/customers/${id}`, { method: "DELETE" });
+    setFreeing(false);
+    if (!res.ok) {
+      setConfirming(null);
+      setFreeMessage({ ok: false, text: "Couldn't delete the customer. Try again." });
+      return;
+    }
+    router.push("/");
+    router.refresh();
+  }
 
   /** The review type sets the period (last month / quarter / half-year / year); dates stay editable. */
   function chooseReportType(type: ReportTypeKey) {
@@ -497,6 +531,71 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
             </div>
           </section>
         )}
+
+        <section className="rounded-lg border border-neutral-200 p-5 dark:border-neutral-800">
+          <h2 className="mb-1 font-medium">Free up storage</h2>
+          <p className="mb-4 text-sm text-neutral-500">
+            The free database holds 500 MB. Once you&apos;ve downloaded the decks you need, clear this customer&apos;s data.
+            Download first: a deck can&apos;t be downloaded again until the account is synced again.
+          </p>
+
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-neutral-200 p-3 dark:border-neutral-800">
+              <div className="text-sm">
+                <div className="font-medium">Clear synced data</div>
+                <div className="text-neutral-500">Removes Zuper records, metrics, reports and sync history. Keeps the customer, website, notes and connection.</div>
+              </div>
+              {confirming === "clear" ? (
+                <div className="flex gap-2">
+                  <button onClick={clearData} disabled={freeing} className="rounded-md bg-red-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-50">
+                    {freeing ? "Clearing…" : "Yes, clear it"}
+                  </button>
+                  <button onClick={() => setConfirming(null)} disabled={freeing} className="rounded-md border border-neutral-300 px-3 py-2 text-sm dark:border-neutral-700">
+                    Cancel
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => setConfirming("clear")}
+                  disabled={freeing || syncing}
+                  className="rounded-md border border-red-300 px-3 py-2 text-sm text-red-700 disabled:opacity-50 dark:border-red-900 dark:text-red-400"
+                >
+                  Clear synced data
+                </button>
+              )}
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-neutral-200 p-3 dark:border-neutral-800">
+              <div className="text-sm">
+                <div className="font-medium">Delete customer</div>
+                <div className="text-neutral-500">Removes the customer and everything about it. This can&apos;t be undone.</div>
+              </div>
+              {confirming === "delete" ? (
+                <div className="flex gap-2">
+                  <button onClick={deleteCustomer} disabled={freeing} className="rounded-md bg-red-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-50">
+                    {freeing ? "Deleting…" : `Yes, delete ${customer.name}`}
+                  </button>
+                  <button onClick={() => setConfirming(null)} disabled={freeing} className="rounded-md border border-neutral-300 px-3 py-2 text-sm dark:border-neutral-700">
+                    Cancel
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => setConfirming("delete")}
+                  disabled={freeing || syncing}
+                  className="rounded-md border border-red-300 px-3 py-2 text-sm text-red-700 disabled:opacity-50 dark:border-red-900 dark:text-red-400"
+                >
+                  Delete customer
+                </button>
+              )}
+            </div>
+          </div>
+
+          {freeMessage && <p className={`mt-3 text-sm ${freeMessage.ok ? "text-green-700 dark:text-green-400" : "text-red-600"}`}>{freeMessage.text}</p>}
+          <p className="mt-3 text-xs text-neutral-500">
+            The storage bar on the Customers page may not drop straight away: the database keeps freed space and reuses it for the next syncs, so it stops growing.
+          </p>
+        </section>
       </main>
     </div>
   );

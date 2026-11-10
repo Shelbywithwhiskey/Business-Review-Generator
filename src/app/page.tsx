@@ -17,10 +17,28 @@ function loadCustomers() {
   });
 }
 
+/** Stored rows per customer across the tables that hold most of the data — which accounts use the space. */
+async function loadRecordCounts(): Promise<Map<string, number>> {
+  const rows = await prisma.$queryRaw<{ customerId: string; n: bigint }[]>`
+    SELECT "customerId", COUNT(*) AS n FROM (
+      SELECT "customerId" FROM "Job" UNION ALL
+      SELECT "customerId" FROM "JobLineItem" UNION ALL
+      SELECT "customerId" FROM "ZuperRecord" UNION ALL
+      SELECT "customerId" FROM "Invoice" UNION ALL
+      SELECT "customerId" FROM "Quote" UNION ALL
+      SELECT "customerId" FROM "Payment" UNION ALL
+      SELECT "customerId" FROM "TimesheetEvent" UNION ALL
+      SELECT "customerId" FROM "EndCustomerLedger" UNION ALL
+      SELECT "customerId" FROM "Property"
+    ) t GROUP BY "customerId"`;
+  return new Map(rows.map((r) => [r.customerId, Number(r.n)]));
+}
+
 export default async function DashboardPage() {
   let customers: Awaited<ReturnType<typeof loadCustomers>> | null = null;
+  let records = new Map<string, number>();
   try {
-    customers = await loadCustomers();
+    [customers, records] = await Promise.all([loadCustomers(), loadRecordCounts().catch(() => new Map<string, number>())]);
   } catch (err) {
     // A down database gets a plain explanation; any other error still goes to error.tsx.
     if (!isDatabaseUnavailable(err)) throw err;
@@ -62,6 +80,7 @@ export default async function DashboardPage() {
                   <div className="text-right text-sm text-neutral-500">
                     <div>{c.credential?.lastVerifiedAt ? "Connection verified" : "Not connected yet"}</div>
                     <div>{lastSync ? `Last sync: ${lastSync.status}` : "Never synced"}</div>
+                    <div>{(records.get(c.id) ?? 0).toLocaleString("en-US")} records stored</div>
                   </div>
                 </Link>
               );
