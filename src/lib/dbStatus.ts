@@ -6,7 +6,10 @@ import { Prisma } from "@prisma/client";
 const UNREACHABLE_CODES = new Set(["P1001", "P1002", "P1008", "P1017", "P2024"]);
 
 export const DB_UNAVAILABLE_MESSAGE =
-  "The database is unavailable. It may be powered off or out of free-tier quota — check the Aiven console, then try again.";
+  "The database is unavailable. It may be paused or out of free-tier storage — check the Supabase dashboard, then try again.";
+
+/** Supabase's free plan allows 500 MB per project. Override with DB_STORAGE_LIMIT_MB if the plan changes. */
+export const DB_STORAGE_LIMIT_MB = Number(process.env.DB_STORAGE_LIMIT_MB) || 500;
 
 /** True when the error means the database is down or unreachable (not a bug in a query). */
 export function isDatabaseUnavailable(err: unknown): boolean {
