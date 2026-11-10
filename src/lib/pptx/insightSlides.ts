@@ -76,6 +76,7 @@ export function customersRevenueSlide(ctx: InsightCtx, c: CustomerRevenue): Shap
     kind: "bar",
     categories: c.topCustomers.map((t) => truncate(t.name, 26)),
     series: [{ name: c.valued ? "Job value" : "Jobs", values: c.topCustomers.map((t) => Math.round(c.valued ? t.value : t.jobs)), color: SERIES[0] }],
+    ...(c.valued ? { numberFormat: "$#,##0" } : {}),
   });
 
   const rx = CONTENT_X + leftW + GAP;

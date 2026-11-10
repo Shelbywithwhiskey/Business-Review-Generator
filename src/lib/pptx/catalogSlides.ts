@@ -104,6 +104,7 @@ export function jobServiceSlide(ctx: Ctx, s: JobServiceDelivery): ShapeWriter {
           tone: "risk",
           headline: `${fmtInt(openHeavy.overdueOpen)} ${openHeavy.name} jobs are past their scheduled date and still open`,
           detail: `${pct(openHeavy.overdueOpen / Math.max(ot.overdueOpen, 1))} of all past-due jobs — confirm whether they're live work or pipeline that should be closed or rescheduled.`,
+          action: `Run a one-off clean-up of past-due ${openHeavy.name} jobs: reschedule the live ones and close the rest.`,
           score: 70,
           area: "Service delivery",
         },
@@ -115,7 +116,12 @@ export function jobServiceSlide(ctx: Ctx, s: JobServiceDelivery): ShapeWriter {
             lateCat.medianDaysLate > 7
               ? "either the work runs long or jobs aren't closed out in Zuper when finished — which one changes the fix."
               : "close to schedule; tighten close-out so completion dates reflect the real finish.",
-          score: 64,
+          action:
+            lateCat.medianDaysLate > 7
+              ? `Ask the field team to mark ${lateCat.name} jobs complete on site in the mobile app; if the work truly runs long, re-set the scheduled duration.`
+              : undefined,
+          // Materiality follows lateness: a couple of days isn't the same finding as two weeks.
+          score: lateCat.medianDaysLate > 7 ? 64 : 42,
           area: "Service delivery",
         },
       bestCat &&
@@ -136,7 +142,8 @@ export function jobServiceSlide(ctx: Ctx, s: JobServiceDelivery): ShapeWriter {
         (s.invoicing?.completed ?? 0) >= 20 && {
           tone: "risk",
           headline: `Only ${pct(invRate)} of completed jobs have an invoice attached`,
-          detail: "either billing happens outside Zuper or finished work isn't being billed promptly — worth confirming.",
+          detail: `${fmtInt(Math.round((s.invoicing?.completed ?? 0) * (1 - invRate)))} of ${fmtInt(s.invoicing?.completed ?? 0)} completed jobs have no invoice in Zuper — billed elsewhere, or not billed yet.`,
+          action: "Confirm where billing happens; if it should be Zuper, add a workflow that creates the invoice when a job is completed.",
           score: 66,
           area: "Service delivery",
         },
@@ -219,7 +226,8 @@ export function timeOnSiteSlide(ctx: Ctx, s: JobServiceDelivery): ShapeWriter | 
         perJobsWeek < 0.2 && {
           tone: "opportunity",
           headline: `Only ${fmtInt(t.entries)} time logs against ${fmtInt(s.jobsInPeriod)} jobs`,
-          detail: "time tracking isn't part of the field routine yet — consistent clock-in on jobs unlocks labor cost per job and utilization.",
+          detail: `about ${(perJobsWeek * 100).toFixed(0)} time logs per 100 jobs, so labor cost per job can't be measured.`,
+          action: "Make starting and stopping the job timer part of the mobile-app routine, and check weekly who isn't logging.",
           score: 52,
           area: "Team",
         },
@@ -227,6 +235,7 @@ export function timeOnSiteSlide(ctx: Ctx, s: JobServiceDelivery): ShapeWriter | 
         tone: "watch",
         headline: `${fmtInt(t.longEntries)} time log${t.longEntries === 1 ? "" : "s"} ran over 12 hours`,
         detail: "usually a missed clock-out — these inflate logged hours; worth cleaning up before using the numbers.",
+        action: "Correct these entries, and add a workflow reminder when a timer runs past 10 hours.",
         score: 40,
         area: "Team",
       },
@@ -286,7 +295,8 @@ export function portalPaySlide(ctx: Ctx, p: PortalAndPay): ShapeWriter {
         onlineShare < 0.3 && {
           tone: "opportunity",
           headline: `${pct(1 - onlineShare)} of payments (${fmtMoneyCompact(p.online.total - p.online.amount)}) were collected offline`,
-          detail: "Zuper Pay payment links, card-on-file and ACH move that money online and into the same record as the invoice.",
+          detail: `only ${pct(onlineShare)} of ${fmtMoneyCompact(p.online.total)} received was paid online this period.`,
+          action: "Send every invoice with a Zuper Pay link (card or ACH) and offer card-on-file to repeat customers.",
           score: 64,
           area: "Zuper Pay",
         },
@@ -294,7 +304,7 @@ export function portalPaySlide(ctx: Ctx, p: PortalAndPay): ShapeWriter {
         onlineShare >= 0.5 && {
           tone: "win",
           headline: `${pct(onlineShare)} of payments are already collected online`,
-          detail: "a strong digital-payments adoption story.",
+          detail: `${fmtMoneyCompact(p.online.amount)} of ${fmtMoneyCompact(p.online.total)} arrived without anyone keying it in.`,
           score: 50,
           area: "Zuper Pay",
         },
@@ -303,7 +313,8 @@ export function portalPaySlide(ctx: Ctx, p: PortalAndPay): ShapeWriter {
         backOffice.amount / p.online.total > 0.7 && {
           tone: "watch",
           headline: `${pct(backOffice.amount / p.online.total)} of payments are keyed in by the back office`,
-          detail: "customers aren't paying themselves yet — self-serve payment is the Customer Portal / Zuper Pay conversation.",
+          detail: `${fmtMoneyCompact(backOffice.amount)} was entered by staff rather than paid by the customer.`,
+          action: "Turn on the Customer Portal and include a pay-now link on invoices so customers pay themselves.",
           score: 48,
           area: "Zuper Pay",
         },
@@ -320,7 +331,8 @@ export function portalPaySlide(ctx: Ctx, p: PortalAndPay): ShapeWriter {
         p.portalOrgs.enabled / p.portalOrgs.total < 0.5 && {
           tone: "opportunity",
           headline: `Portal access is on for ${fmtInt(p.portalOrgs.enabled)} of ${fmtInt(p.portalOrgs.total)} organizations`,
-          detail: "turning it on lets B2B customers see jobs and invoices and pay without calling in.",
+          detail: `${fmtInt(p.portalOrgs.total - p.portalOrgs.enabled)} organizations can't see their jobs and invoices or pay without calling in.`,
+          action: "Enable portal access for the remaining organizations, starting with the ones that book the most work.",
           score: 50,
           area: "Customer Portal",
         },
@@ -363,7 +375,14 @@ export function connectSlide(ctx: Ctx, calls: ModuleAnalysis | undefined, sms: M
       co([
         failed
           ? { tone: "watch", headline: "Connect call data failed to sync", detail: "re-sync before presenting — this is a sync error, not a sign Connect isn't used.", score: 15, area: "Zuper Connect" }
-          : { tone: "opportunity", headline: "No calls or texts are flowing through Zuper Connect", detail: "Connect puts every customer call and text on the job record; CSR Agent answers the overflow.", score: 40, area: "Zuper Connect" },
+          : {
+              tone: "opportunity",
+              headline: "No calls or texts are flowing through Zuper Connect",
+              detail: "customer calls and texts happen outside Zuper, so they aren't on the job record.",
+              action: "Demo Zuper Connect and CSR Agent: every call and text lands on the job, and missed calls get answered.",
+              score: 40,
+              area: "Zuper Connect",
+            },
       ]),
       ""
     );
@@ -398,7 +417,8 @@ export function connectSlide(ctx: Ctx, calls: ModuleAnalysis | undefined, sms: M
       c.inboundMissed >= 10 && {
         tone: "opportunity",
         headline: `${fmtInt(c.inboundMissed)} inbound calls went unanswered or to voicemail`,
-        detail: `${answerRate != null ? `${pct(1 - answerRate)} of inbound calls` : "inbound calls"} — each is a potential lost job; CSR Agent answers overflow and after-hours calls and books the work.`,
+        detail: `${answerRate != null ? `${pct(1 - answerRate)} of inbound calls` : "inbound calls"} — each is a potential lost job.`,
+        action: "Turn on CSR Agent for overflow and after-hours calls, and set a missed-call text-back in Zuper Connect.",
         score: 78,
         area: "Zuper Connect",
       },
@@ -503,6 +523,7 @@ export function moduleSlide(ctx: Ctx, m: ModuleAnalysis, context: { quotesInPeri
           tone: "watch",
           headline: `All ${fmtInt(m.total)} ${m.label.toLowerCase()} are "${tidy(singleStatus.value).toLowerCase()}"`,
           detail: "nothing has moved past this status — check the process is being followed in Zuper.",
+          action: `Walk through the ${m.label.toLowerCase()} process with the admin and confirm who moves records forward.`,
           score: 42,
           area: m.area,
         },
