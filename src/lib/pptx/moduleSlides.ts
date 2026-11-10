@@ -28,7 +28,7 @@ import { detectIndustry, type IndustryResult, type MetricKey } from "@/lib/repor
 import type { CallSummary, CoverageRow } from "@/lib/reports/catalogMetrics";
 import { generateStoryNarrative } from "@/lib/ai";
 import { computeCustomerRevenue, computeSpeedEfficiency, computeTeamProductivity } from "@/lib/reports/insights";
-import { customersRevenueSlide, speedSlide, teamProductivitySlide } from "./insightSlides";
+import { builtTogetherSlide, customersRevenueSlide, scalingSlide, speedSlide, teamProductivitySlide, type Capability, type GrowthYear } from "./insightSlides";
 import { METRIC_TITLES, flowSlide, growthSlide, industrySlide, journeySlide, thenNowSlide, yearOverYearSlide, type MetricReading } from "./storySlides";
 
 const compact = (xs: (string | number | null | false | undefined)[]) => xs.filter((x): x is string => typeof x === "string" && x.length > 0);
@@ -1080,6 +1080,8 @@ function topCalloutsSlide(ctx: DeckContext, all: Callout[]): ShapeWriter {
 export interface ModuleSlidesResult {
   /** The Top Call-outs slide, which the brief slide follows. */
   topCalloutsPath: string;
+  /** "What We've Built Together", when the account has enough in use; the improvement page follows it. */
+  builtTogetherPath: string | null;
   industry: IndustryResult;
   monthsOnZuper: number | null;
   coverage: CoverageRow[];
@@ -1209,9 +1211,100 @@ export async function insertModuleSlides(zip: JSZip, input: ModuleDeckInput): Pr
     })
   );
 
+  // ---- Partnership pages rebuilt from the account's data (template 26 and 29 carried sample copy) ----
+  const proposalTemplates = byKey.get("proposal_templates")?.total ?? 0;
+  const live = input.workflowSummary;
+  const capabilities: Capability[] = [
+    {
+      title: "Job Management",
+      points: compact([
+        j.totals.jobs > 0 && `${fmtInt(j.totals.jobs)} jobs run through Zuper since ${j.goLive ? fmtDate(j.goLive) : "go-live"}`,
+        jobs.categories.length > 1 && `${fmtInt(jobs.categories.length)} job categories in use, led by ${jobs.categories[0].name}`,
+        jobs.created > 0 && `${pct0(jobs.completionRate)} of this period's ${fmtInt(jobs.created)} jobs completed`,
+      ]),
+    },
+    {
+      title: "Scheduling & Dispatch",
+      points: compact([
+        team.teamSize > 0 && `${fmtInt(team.teamSize)} active users working in Zuper`,
+        jobs.created > 0 && team.jobsAssigned > 0 && `${pct0(team.jobsAssigned / jobs.created)} of jobs assigned to a technician`,
+        jobs.medianHoursToSchedule != null && `Jobs scheduled a median ${fmtDuration(jobs.medianHoursToSchedule).toLowerCase()} after creation`,
+      ]),
+    },
+    j.uses.quotes && {
+      title: "Quotes & Proposals",
+      points: compact([
+        `${fmtMoneyCompact(j.totals.quoteValue)} quoted across ${fmtInt(j.totals.quotes)} quotes`,
+        quotes.sent > 0 && `${pct0(quotes.conversionRate)} of quotes sent this period accepted`,
+        proposalTemplates > 0 && `${plural(proposalTemplates, "proposal template")} for consistent, branded quotes`,
+      ]),
+    },
+    j.uses.invoices && {
+      title: "Invoicing & Payments",
+      points: compact([
+        `${fmtMoneyCompact(j.totals.invoiced)} invoiced and ${fmtMoneyCompact(j.totals.collected)} collected in Zuper`,
+        invoices.paymentsTotal > 0 && `${pct0(invoices.onlineShare)} of this period's payments collected online`,
+        invoices.medianDaysToPay != null && `Invoices paid a median ${invoices.medianDaysToPay.toFixed(0)} days after issue`,
+      ]),
+    },
+    live.live > 0 && {
+      title: "Workflow Automation",
+      points: compact([
+        `${plural(live.live, "live workflow")} automating ${plural(live.liveSteps, "step")}`,
+        live.triggers[0] && `Most common trigger: ${live.triggers[0].name}`,
+        exec.available && exec.total > 0 && `${fmtInt(exec.total)} automated runs in the review window`,
+      ]),
+    },
+    calls &&
+      calls.inPeriod > 0 && {
+        title: "Zuper Connect",
+        points: compact([
+          `${fmtInt(calls.inPeriod)} calls handled through Zuper Connect this period`,
+          calls.recordedShare != null && calls.recordedShare > 0 && `${pct0(calls.recordedShare)} of calls recorded on the job record`,
+        ]),
+      },
+    accounts.customers.total > 0 && {
+      title: "Customers & Properties",
+      points: compact([
+        `${fmtInt(accounts.customers.total)} customers managed in Zuper`,
+        accounts.properties.total > 0 && `${fmtInt(accounts.properties.total)} service properties on record`,
+        accounts.organizations.total > 0 && `${fmtInt(accounts.organizations.total)} B2B organizations`,
+      ]),
+    },
+    portalPay.portalOrgs &&
+      portalPay.portalOrgs.enabled > 0 && {
+        title: "Customer Portal",
+        points: compact([`Portal access on for ${fmtInt(portalPay.portalOrgs.enabled)} organizations`, portalPay.portalPayments && portalPay.portalPayments.count > 0 && `${plural(portalPay.portalPayments.count, "payment")} made through the portal`]),
+      },
+    projects.total > 0 && { title: "Projects", points: [`${plural(projects.total, "multi-job project")} managed in Zuper`] },
+  ].filter((c): c is Capability => !!c && typeof c === "object" && c.points.length > 0);
+  const built = builtTogetherSlide(cctx, capabilities, j.goLive ? j.monthsOnZuper : 0);
+  const builtTogetherPath = built ? await insertGeneratedSlide(zip, "ppt/slides/slide26.xml", built) : null;
+
+  const yearly = new Map<number, GrowthYear>();
+  for (const m of j.months) {
+    const y = m.start.getUTCFullYear();
+    const e = yearly.get(y) ?? { label: String(y), jobs: 0, completed: 0, invoiced: 0, customersAdded: 0, partial: false };
+    e.jobs += m.jobsCreated;
+    e.completed += m.jobsCompleted;
+    e.invoiced += m.invoiced;
+    e.customersAdded += m.customersAdded;
+    yearly.set(y, e);
+  }
+  const years = [...yearly.entries()].sort((a, b) => a[0] - b[0]);
+  for (const [y, e] of years) {
+    const startedMidYear = j.goLive != null && j.goLive.getUTCFullYear() === y && j.goLive.getUTCMonth() > 0;
+    const unfinished = y === range.end.getUTCFullYear() && !(range.end.getUTCMonth() === 11 && range.end.getUTCDate() === 31);
+    e.partial = startedMidYear || unfinished;
+    if (unfinished) e.label = `${y} YTD`;
+    else if (startedMidYear) e.label = `${y} (from ${fmtDate(j.goLive!).slice(0, 3)})`;
+  }
+  const scaling = scalingSlide(cctx, years.map(([, e]) => e), industry.label, j.uses.invoices);
+  if (scaling) await insertGeneratedSlide(zip, "ppt/slides/slide28.xml", scaling);
+
   // Executive summary, placed right after the scope slide once every slide's call-outs exist.
   const topCalloutsPath = await insertGeneratedSlide(zip, scope, topCalloutsSlide(ctx, collectedCallouts(zip)));
-  return { topCalloutsPath, industry, monthsOnZuper: j.goLive ? j.monthsOnZuper : null, coverage };
+  return { topCalloutsPath, builtTogetherPath, industry, monthsOnZuper: j.goLive ? j.monthsOnZuper : null, coverage };
 }
 
 function storyValue(m: { unit: string }, v: number): string {

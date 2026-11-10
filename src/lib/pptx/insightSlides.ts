@@ -417,6 +417,138 @@ export function speedSlide(ctx: InsightCtx, s: SpeedEfficiency): ShapeWriter | n
   return w;
 }
 
+// ---- What We've Built Together -------------------------------------------------------
+
+export interface Capability {
+  title: string;
+  /** Up to 3 short proof points, each carrying the account's own figure. */
+  points: string[];
+}
+
+/** The Zuper capabilities this account actually runs on, with proof from its data (up to 6, in the order given). */
+export function builtTogetherSlide(ctx: InsightCtx, caps: Capability[], monthsOnZuper: number): ShapeWriter | null {
+  const shown = caps.filter((c) => c.points.length).slice(0, 6);
+  if (shown.length < 2) return null;
+  const w = new ShapeWriter();
+  w.header("What We've Built Together", `What ${ctx.customerName} runs on Zuper today${monthsOnZuper ? `  ·  ${monthsOnZuper} months of partnership` : ""}`);
+  const cols = 3;
+  const gap = 150000;
+  const cw = (CONTENT_W - gap * (cols - 1)) / cols;
+  const rowsN = Math.ceil(shown.length / cols);
+  const ch = Math.min(2350000, (4950000 - (rowsN - 1) * gap) / rowsN);
+  shown.forEach((c, i) => {
+    const x = CONTENT_X + (i % cols) * (cw + gap);
+    const y = 1300000 + Math.floor(i / cols) * (ch + gap);
+    w.rect(x, y, cw, ch, COLORS.white, { radius: 5000, border: COLORS.border });
+    w.rect(x, y, 70000, ch, COLORS.orange);
+    w.text(x + 220000, y + 160000, cw - 380000, 300000, run(c.title.toUpperCase(), { sz: 1150, color: COLORS.orange, bold: true }), { wrap: "none" });
+    c.points.slice(0, 3).forEach((p, k) => {
+      const py = y + 560000 + k * 520000;
+      w.rect(x + 230000, py + 80000, 70000, 70000, COLORS.orange, { radius: 50000 });
+      w.text(x + 380000, py, cw - 560000, 480000, run(truncate(p, 90), { sz: 1050, color: COLORS.ink }));
+    });
+  });
+  w.footer(`Source: ${ctx.customerName}'s Zuper records — totals since go-live, configuration as of the last sync · ${ctx.syncLine}`);
+  w.notes = {
+    purpose: "What the partnership has put in place: every capability shown is one the account actively uses, with its own numbers.",
+    talkingPoints: [
+      "Walk the cards as achievements the two teams built together; pause on the one the customer values most.",
+      "Anything not shown here isn't in use yet — those are on the improvement and priorities slides.",
+    ],
+    callouts: shown.map((c) => `${c.title}: ${c.points.join("; ")}`),
+    caveats: [ctx.syncLine],
+  };
+  return w;
+}
+
+// ---- Scaling Together -----------------------------------------------------------------
+
+export interface GrowthYear {
+  label: string;
+  jobs: number;
+  completed: number;
+  invoiced: number;
+  customersAdded: number;
+  /** The year isn't over (or the account started mid-year). */
+  partial: boolean;
+}
+
+export function scalingSlide(ctx: InsightCtx, years: GrowthYear[], industryLabel: string, usesInvoices: boolean): ShapeWriter | null {
+  const shown = years.filter((y) => y.jobs > 0).slice(-4);
+  if (!shown.length) return null;
+  const w = new ShapeWriter();
+  const firstFull = shown.find((y) => !y.partial);
+  const lastFull = [...shown].reverse().find((y) => !y.partial);
+  w.header(
+    `Scaling Together: ${truncate(ctx.customerName, 40)} on Zuper`,
+    firstFull && lastFull && firstFull !== lastFull
+      ? `Jobs per year grew from ${fmtInt(firstFull.jobs)} (${firstFull.label}) to ${fmtInt(lastFull.jobs)} (${lastFull.label})`
+      : `Jobs, billing and new customers each year on Zuper  ·  ${fmtInt(shown.reduce((s, y) => s + y.jobs, 0))} jobs so far`
+  );
+
+  // Left: the partnership framework, tied to this account's trade.
+  const leftW = CONTENT_W * 0.36;
+  const trade = industryLabel.toLowerCase();
+  const framework: [string, string][] = [
+    ["ENTERPRISE READINESS", "Proven with field-service teams from single crews to multi-region operations, on one platform."],
+    ["STRATEGY ALIGNMENT", `Zuper's ${trade} focus matches ${ctx.customerName}'s growth plans — the product roadmap is built for this trade.`],
+    ["INNOVATION TRACK RECORD", "AI agents for the field, the front desk and collections, built into the same system the team already uses."],
+  ];
+  const fh = (4450000 - 2 * GAP) / 3;
+  framework.forEach(([title, body], i) => {
+    const y = 1300000 + i * (fh + GAP);
+    w.rect(CONTENT_X, y, leftW, fh, COLORS.white, { radius: 6000, border: COLORS.border });
+    w.text(CONTENT_X + 180000, y + 140000, leftW - 360000, 240000, run(title, { sz: 1000, color: COLORS.orange, bold: true }), { wrap: "none" });
+    w.text(CONTENT_X + 180000, y + 430000, leftW - 360000, fh - 520000, run(body, { sz: 1050, color: COLORS.ink }));
+  });
+
+  // Right: year-by-year growth from the account's own records.
+  const rx = CONTENT_X + leftW + GAP;
+  const rw = CONTENT_W - leftW - GAP;
+  const a = w.card(rx, 1300000, rw, 4450000, "GROWTH ON ZUPER, YEAR BY YEAR");
+  w.chart(a.x, a.y, a.cx, 2000000, {
+    kind: "column",
+    categories: shown.map((y) => y.label),
+    series: [
+      { name: "Jobs created", values: shown.map((y) => y.jobs), color: SERIES[0] },
+      { name: "Jobs completed", values: shown.map((y) => y.completed), color: SERIES[1] },
+    ],
+  });
+  table(
+    w,
+    { x: a.x + 60000, y: a.y + 2150000, cx: a.cx - 120000, cy: a.cy - 2150000 },
+    [
+      { label: "YEAR", w: 0.28 },
+      { label: "JOBS", w: 0.18, align: "r" },
+      { label: usesInvoices ? "INVOICED" : "COMPLETED", w: 0.27, align: "r" },
+      { label: "NEW CUSTOMERS", w: 0.27, align: "r" },
+    ],
+    shown.map((y) => [y.label, fmtInt(y.jobs), usesInvoices ? fmtMoneyCompact(y.invoiced) : fmtInt(y.completed), fmtInt(y.customersAdded)])
+  );
+
+  const growth = firstFull && lastFull && firstFull !== lastFull && firstFull.jobs ? lastFull.jobs / firstFull.jobs - 1 : null;
+  w.keyCallouts(
+    co([
+      growth != null &&
+        growth >= 0.1 && {
+          tone: "win",
+          headline: `Job volume on Zuper is up ${pct0(growth)} from ${firstFull!.label} to ${lastFull!.label}`,
+          detail: `${fmtInt(firstFull!.jobs)} → ${fmtInt(lastFull!.jobs)} jobs a year, run through the same platform.`,
+          score: 56 + Math.min(14, growth * 10),
+          area: "Growth",
+        },
+    ]),
+    `${fmtInt(shown.reduce((s, y) => s + y.jobs, 0))} jobs run through Zuper across ${shown.length} year${shown.length === 1 ? "" : "s"}.`
+  );
+  w.footer(`Source: ${ctx.customerName}'s Zuper Jobs, Invoices & Customers by calendar year · YTD = year still in progress · ${ctx.syncLine}`);
+  w.notes = {
+    purpose: "Where the partnership has taken the business so far, and why Zuper is the platform to scale on next.",
+    talkingPoints: ["Let the yearly numbers make the growth case; then link the framework to the priorities agreed on the next slides."],
+    caveats: ["A partial year (YTD) isn't comparable with a full year.", ctx.syncLine],
+  };
+  return w;
+}
+
 // ---- What Could Be Done Better ------------------------------------------------------
 
 /** Customer-facing wording: a risk on this page is something to fix, not an accusation. */

@@ -17,11 +17,10 @@ import type { Callout } from "@/lib/reports/callouts";
 
 const TEMPLATE_PATH = path.join(process.cwd(), "templates", "ebr-template.pptx");
 
-/** The template was laid out from one sample customer's review; these pages carry that customer's own
- * timeline, delivered projects and placeholder figures, so they never go into a generated deck. The
- * data-driven journey slide (storySlides.ts) covers each account's own history instead. */
+/** The template was laid out from one sample customer's review. Partnership Journey (slide 11) is
+ * refilled with each account's own milestones (ebrTokens); these two are rebuilt as generated pages
+ * from the account's data (insightSlides: builtTogetherSlide, scalingSlide), so the originals go. */
 const SAMPLE_CUSTOMER_SLIDES = [
-  "ppt/slides/slide11.xml", // Partnership Journey — sample customer's dated milestones
   "ppt/slides/slide26.xml", // What We've Built Together — sample customer's delivered projects
   "ppt/slides/slide29.xml", // Scaling Together — placeholder figures ("X users", "A data point")
 ];
@@ -39,13 +38,15 @@ function escXml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-/** Rewrites specific <a:t> runs by position; a run is only changed if it still reads `expect`. */
-function applyRunFixes(xml: string, fixes: RunFix[]): string {
+/** Rewrites specific <a:t> runs by position; a run is only changed if it still reads `expect`
+ * (compared ignoring runs of whitespace — the template's sample text has stray double spaces). */
+export function applyRunFixes(xml: string, fixes: RunFix[]): string {
+  const norm = (s: string) => s.replace(/\s+/g, " ").trim();
   let i = -1;
   return xml.replace(/<a:t>([^<]*)<\/a:t>/g, (whole, text: string) => {
     i += 1;
     const fix = fixes.find((f) => f.index === i);
-    return fix && text === fix.expect ? `<a:t>${escXml(fix.text)}</a:t>` : whole;
+    return fix && norm(text) === norm(fix.expect) ? `<a:t>${escXml(fix.text)}</a:t>` : whole;
   });
 }
 
@@ -182,7 +183,7 @@ export async function generateEbrPptx(options: GenerateEbrPptxOptions): Promise<
   await insertGeneratedSlide(zip, await lastSlidePath(zip), referenceSlide(customerName, deckCallouts, brief));
   // The improvement agenda, right before the leadership working session and priorities (slides 27–28).
   const improvements = improvementsSlide(customerName, deckCallouts);
-  if (improvements) await insertGeneratedSlide(zip, "ppt/slides/slide25.xml", improvements);
+  if (improvements) await insertGeneratedSlide(zip, modules.builtTogetherPath ?? "ppt/slides/slide25.xml", improvements);
   await fillPriorities(zip, tokens, deckCallouts);
   // Last, so no later insert anchors on a removed slide: template pages for modules the account doesn't
   // use, and pages that only made sense for the sample customer the template was designed around.

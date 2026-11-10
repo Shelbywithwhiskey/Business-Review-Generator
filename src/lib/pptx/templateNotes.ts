@@ -119,8 +119,9 @@ export function buildTemplateNotes(i: TemplateNotesInput): Record<string, SlideN
       i.firsts.firstWorkflow && `First workflow built: ${date(i.firsts.firstWorkflow)}.`,
     ]),
     metrics: [{ label: "First-use dates", definition: "Earliest record of each type in the synced data. Sync pulls full history, so these are first recorded use — unless records were imported or deleted.", source: "Zuper Jobs, Quotes, Invoices, Payments, Workflow Builder", evidence: "Observed activity" }],
-    editBeforePresenting: [
-      "The milestone dates and descriptions on this slide are placeholder copy from another account. Replace them with this customer's real contract, onboarding, training and launch dates (the first-use dates above help anchor go-live).",
+    talkingPoints: [
+      "Every step is from the account's own records: go-live, each capability's first use, job-volume milestones and the busiest month.",
+      "Contract signing and onboarding dates aren't in Zuper's data — mention them verbally if they matter to the story.",
     ],
   });
   set(12, { purpose: "Section divider: business KPIs, insights and trends.", talkingPoints: ["Set up the next section: everything that follows is counted directly from the account's Zuper records for the report period."] });

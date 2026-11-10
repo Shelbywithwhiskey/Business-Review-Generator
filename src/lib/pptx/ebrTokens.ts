@@ -128,6 +128,71 @@ export async function computeSharedDeckData(customerId: string, range: DateRange
   return { catalog, delivery, jobsDeep, quotesDeep, exec, sync, journey, yoy, website };
 }
 
+// ---- Partnership Journey (template slide 11) ---------------------------------------------------
+// Seven numbered steps (date + one line). The template's sample-customer milestones are replaced with
+// this account's own: go-live, each capability coming online, job-volume milestones, its busiest month,
+// and where it stands today. Run indices are the slide's <a:t> positions; a label split across several
+// runs gets its text in the first run and the rest blanked.
+
+const JOURNEY_SLOTS: { date: number; dateExpect: string; label: { index: number; expect: string }[] }[] = [
+  { date: 3, dateExpect: "Aug 2024", label: [{ index: 4, expect: "Contract signed — partnership begins" }] },
+  { date: 6, dateExpect: "Sep 2024", label: [{ index: 7, expect: "Onboarding kicks off with hands-on setup" }] },
+  { date: 9, dateExpect: "Nov 2024", label: [{ index: 10, expect: "Roof Doctors validates SOPs built in Zuper" }] },
+  { date: 12, dateExpect: "Dec 2024", label: [{ index: 13, expect: "Team trained on SOPs and platform workflows" }] },
+  { date: 15, dateExpect: "Dec 2024", label: [{ index: 16, expect: "Zuper" }, { index: 17, expect: " officially launches for Roof Doctors" }] },
+  { date: 19, dateExpect: "Dec 2024 – Dec 2025", label: [{ index: 20, expect: "Full adoption achieved — active daily usage" }] },
+  { date: 23, dateExpect: "Jan 2026– To Date", label: [{ index: 24, expect: "Upgrading to " }, { index: 25, expect: "Zuper's" }, { index: 26, expect: " modern tech stack" }] },
+];
+
+const MILESTONE_WORDING: Record<string, string> = {
+  "First quote": "First quote sent from Zuper",
+  "First invoice": "Invoicing moves into Zuper",
+  "First online payment": "First online payment collected",
+  "First automation": "First workflow automation built",
+  "First proposal": "First branded proposal sent",
+  "First project": "First multi-job project managed in Zuper",
+  "Zuper Connect calls start": "Calls and texts move to Zuper Connect",
+};
+
+export function partnershipJourneyFixes(customerName: string, j: SharedDeckData["journey"], range: DateRange): RunFix[] {
+  const month = (d: Date) => new Date(d).toLocaleDateString("en-US", { month: "short", year: "numeric", timeZone: "UTC" });
+  const fixes: RunFix[] = [{ index: 0, expect: "Partnership Journey — Roof Doctors  Launch", text: `Partnership Journey — ${customerName}` }];
+  const steps: { at: Date; date: string; label: string }[] = [];
+  if (j.goLive) {
+    const first = { at: j.goLive, date: month(j.goLive), label: `${customerName} goes live — first work runs through Zuper` };
+    const capabilities = j.milestones
+      .filter((m) => MILESTONE_WORDING[m.label] && m.date > j.goLive!)
+      .map((m) => ({ at: m.date, date: month(m.date), label: MILESTONE_WORDING[m.label] }));
+    // Job-volume milestones: the month cumulative completed jobs first crossed each threshold.
+    const volume: typeof steps = [];
+    let done = 0;
+    const thresholds = [100, 500, 1000, 2500, 5000, 10000, 25000, 50000, 100000];
+    for (const m of j.months) {
+      const before = done;
+      done += m.jobsCompleted;
+      for (const t of thresholds) if (before < t && done >= t) volume.push({ at: m.start, date: month(m.start), label: `${t.toLocaleString("en-US")} jobs completed in Zuper` });
+    }
+    const busiest = [...j.months].filter((m) => m.end <= range.end).sort((a, b) => b.jobsCreated - a.jobsCreated)[0];
+    const peak = busiest && busiest.jobsCreated >= 20 ? [{ at: busiest.start, date: month(busiest.start), label: `Busiest month yet — ${busiest.jobsCreated.toLocaleString("en-US")} jobs created` }] : [];
+    // Five middle steps: capabilities first (they tell the adoption story), then the biggest volume
+    // milestones and the peak month, all shown in date order.
+    const middle = [...capabilities.slice(0, 4), ...volume.slice(-2).reverse(), ...peak].slice(0, 5).sort((a, b) => a.at.getTime() - b.at.getTime());
+    const today = {
+      at: range.end,
+      date: `${month(range.end)} – Today`,
+      label: `${j.monthsOnZuper} months on Zuper · ${j.totals.jobs.toLocaleString("en-US")} jobs run${j.uses.invoices ? ` · ${fmtMoneyCompact(j.totals.invoiced)} invoiced` : ""}`,
+    };
+    steps.push(first, ...middle, today);
+  }
+  JOURNEY_SLOTS.forEach((slot, i) => {
+    const s = steps[i];
+    fixes.push({ index: slot.date, expect: slot.dateExpect, text: s?.date ?? "" });
+    slot.label.forEach((l, k) => fixes.push({ index: l.index, expect: l.expect, text: k === 0 ? s?.label ?? "" : "" }));
+  });
+  // A young account with fewer than 7 steps leaves the trailing steps blank, ending on "today".
+  return fixes;
+}
+
 export async function buildEbrTokenData(
   customerId: string,
   customerName: string,
@@ -529,11 +594,7 @@ export async function buildEbrTokenData(
 
   const fixups: Record<string, RunFix[]> = {
     "ppt/slides/slide4.xml": [{ index: 7, expect: "Partnership Journey – (Company Name ) &amp; Zuper", text: `Partnership Journey – ${customerName} & Zuper` }],
-    "ppt/slides/slide11.xml": [
-      { index: 0, expect: "Partnership Journey — Roof Doctors  Launch", text: `Partnership Journey — ${customerName} Launch` },
-      { index: 10, expect: "Roof Doctors validates SOPs built in Zuper", text: `${customerName} validates SOPs built in Zuper` },
-      { index: 17, expect: " officially launches for Roof Doctors", text: ` officially launches for ${customerName}` },
-    ],
+    "ppt/slides/slide11.xml": partnershipJourneyFixes(customerName, shared.journey, range),
     "ppt/slides/slide15.xml": [
       { index: 5, expect: " full-year 2025", text: ` ${footprint.priorLabel.toLowerCase()}` },
       {
@@ -614,6 +675,7 @@ export async function buildEbrTokenData(
     !usesInvoices && "ppt/slides/slide18.xml", // Invoice & Collections — Quarterly
     !usesQuotes && !usesInvoices && "ppt/slides/slide16.xml", // Revenue & Quote Performance
     !usesQuotes && !usesInvoices && "ppt/slides/slide19.xml", // Invoice & Quote Value trend
+    !shared.journey.goLive && "ppt/slides/slide11.xml", // Partnership Journey — no history yet
   ].filter((s): s is string => !!s);
   // Business Performance Overview keeps its layout; an unused module's card says so instead of showing zeros.
   const notInUse = (prefix: "QUOTES" | "INVOICES", noun: string, rateRun: { index: number; expect: string }) => {
