@@ -43,6 +43,11 @@ foreach ($k in "DATABASE_URL", "DIRECT_URL") {
   if ($s[$k] -match '\[YOUR-PASSWORD\]') { throw "$k still contains [YOUR-PASSWORD] - put the database password in." }
   try { $u = [Uri]$s[$k] } catch { throw "$k is not a valid URL. If the password has symbols like @ # / ? %, reset it to letters and numbers only." }
 }
+# Supabase's pooler can take longer than Prisma's 5s default to accept the first connection.
+foreach ($k in "DATABASE_URL", "DIRECT_URL") {
+  if ($s[$k] -notmatch 'connect_timeout=') { $s[$k] += $(if ($s[$k].Contains("?")) { "&" } else { "?" }) + "connect_timeout=30" }
+  if ($s[$k] -notmatch 'sslmode=') { $s[$k] += "&sslmode=require" }
+}
 if (([Uri]$s.DATABASE_URL).Port -ne 6543) { throw "DATABASE_URL should be the transaction pooler (port 6543)." }
 if (([Uri]$s.DIRECT_URL).Port -ne 5432) { throw "DIRECT_URL should be the session pooler (port 5432)." }
 
