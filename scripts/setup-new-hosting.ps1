@@ -75,7 +75,10 @@ $vars = [ordered]@{
 if ($s.GEMINI_API_KEY) { $vars.GEMINI_API_KEY = $s.GEMINI_API_KEY }
 foreach ($name in $vars.Keys) {
   # Call the CLI through node, not npx: npx is a .cmd file, and cmd.exe splits values at "&".
+  # The CLI prints notices on stderr; PowerShell 5.1 would turn those into errors under "Stop".
+  $ErrorActionPreference = "Continue"
   node .\node_modules\vercel\dist\index.js env add $name production --value $vars[$name] --yes --force *> $null
+  $ErrorActionPreference = "Stop"
   if ($LASTEXITCODE -ne 0) { throw "Could not save $name in Vercel. Is this folder linked (npx vercel link)?" }
   Write-Host "  saved $name"
 }
