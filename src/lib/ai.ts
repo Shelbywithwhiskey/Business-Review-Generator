@@ -320,33 +320,10 @@ export interface BusinessRecommendation {
   description: string;
 }
 
-const GENERIC_FILLERS: BusinessRecommendation[] = [
-  {
-    title: "Establish a Recurring Reporting Cadence",
-    description: "Set a regular cadence for reviewing account health in Zuper Sense so decisions stay backed by data, not gut feel.",
-  },
-  {
-    title: "Confirm Seat Utilization at Renewal",
-    description: "Review licensed seats against actual login/job activity ahead of renewal to right-size the account.",
-  },
-  {
-    title: "Explore Additional Modules",
-    description: "Ask your CSM whether Zuper Connect, Customer Portal, or Report Builder fit the account's next stage of growth.",
-  },
-  {
-    title: "Revisit Workflow Automation",
-    description: "As job volume grows, periodically re-check which manual steps could move into Workflow Builder.",
-  },
-];
-
-function fillToFour(signals: BusinessRecommendation[]): BusinessRecommendation[] {
-  const out = [...signals];
-  let fillerIdx = 0;
-  while (out.length < 4 && fillerIdx < GENERIC_FILLERS.length) {
-    out.push(GENERIC_FILLERS[fillerIdx]);
-    fillerIdx += 1;
-  }
-  return out.slice(0, 4);
+/** At most four, all data-backed: the deck fills any empty slot from the account's own improvement
+ * call-outs (see ebrExport), never from generic filler text. */
+function fillToFour(recs: BusinessRecommendation[]): BusinessRecommendation[] {
+  return recs.slice(0, 4);
 }
 
 export async function generateBusinessRecommendations(

@@ -406,6 +406,8 @@ export async function buildEbrTokenData(
     missedCalls: highlight("connect_calls", "Missed"),
   });
   const recommendations = await generateBusinessRecommendations(signals, websiteContext, reportTitle);
+  // Slots without a signal keep their {{RECn_*}} tokens; ebrExport fills them from the account's own
+  // top improvement call-outs once every slide has been built.
   recommendations.forEach((rec, i) => {
     tokens[`REC${i + 1}_TITLE`] = rec.title;
     tokens[`REC${i + 1}_DESC`] = rec.description;

@@ -12,8 +12,19 @@ import { injectLineChartData } from "./chartData";
 import { insertUsageSlide } from "./usageSlide";
 import { insertAutomationSlide } from "./automationSlide";
 import { insertModuleSlides } from "./moduleSlides";
+import { improvementPicks, improvementsSlide } from "./insightSlides";
+import type { Callout } from "@/lib/reports/callouts";
 
 const TEMPLATE_PATH = path.join(process.cwd(), "templates", "ebr-template.pptx");
+
+/** The template was laid out from one sample customer's review; these pages carry that customer's own
+ * timeline, delivered projects and placeholder figures, so they never go into a generated deck. The
+ * data-driven journey slide (storySlides.ts) covers each account's own history instead. */
+const SAMPLE_CUSTOMER_SLIDES = [
+  "ppt/slides/slide11.xml", // Partnership Journey — sample customer's dated milestones
+  "ppt/slides/slide26.xml", // What We've Built Together — sample customer's delivered projects
+  "ppt/slides/slide29.xml", // Scaling Together — placeholder figures ("X users", "A data point")
+];
 
 const CHART_FILES: Record<string, keyof Awaited<ReturnType<typeof buildEbrTokenData>>["charts"]> = {
   "ppt/charts/chart1.xml": "chart1",
@@ -47,6 +58,37 @@ function replaceTokens(xml: string, tokens: Record<string, string>): string {
     out = out.split(`{{${key}}}`).join(escaped);
   }
   return out;
+}
+
+/**
+ * Recommended Priorities (slide 28) has four slots. Data-backed signals fill them first (ebrTokens);
+ * any slot left over gets the account's next-most-material improvement call-out that isn't already
+ * covered — and an empty slot only if the account has nothing more to improve.
+ */
+async function fillPriorities(zip: JSZip, tokens: Record<string, string>, deckCallouts: Callout[]) {
+  const path = "ppt/slides/slide28.xml";
+  const file = zip.file(path);
+  if (!file) return;
+  let xml = await file.async("string");
+  if (!xml.includes("{{REC")) return;
+  const used = [1, 2, 3, 4].map((n) => `${tokens[`REC${n}_TITLE`] ?? ""} ${tokens[`REC${n}_DESC`] ?? ""}`.toLowerCase()).join(" ");
+  const covered = (c: Callout) => (c.headline.match(/\$?\d[\d,.]*[KM%]?/g) ?? []).some((num) => num.length >= 3 && used.includes(num.toLowerCase()));
+  const extra = improvementPicks(deckCallouts, 10).filter((c) => !covered(c));
+  const fill: Record<string, string> = {};
+  for (const n of [1, 2, 3, 4]) {
+    if (tokens[`REC${n}_TITLE`] != null) continue;
+    const c = extra.shift();
+    fill[`REC${n}_TITLE`] = c ? truncateWords(c.headline, 60) : "";
+    fill[`REC${n}_DESC`] = c ? c.action ?? c.detail.replace(/^./, (s) => s.toUpperCase()) : "";
+  }
+  xml = replaceTokens(xml, fill);
+  zip.file(path, xml);
+}
+
+function truncateWords(s: string, max: number): string {
+  if (s.length <= max) return s;
+  const cut = s.slice(0, max);
+  return `${cut.slice(0, cut.lastIndexOf(" ")).replace(/[,—–-]\s*$/, "").trimEnd()}…`;
 }
 
 export interface GenerateEbrPptxOptions {
@@ -138,8 +180,13 @@ export async function generateEbrPptx(options: GenerateEbrPptxOptions): Promise<
   await insertGeneratedSlide(zip, modules.topCalloutsPath, accountBriefSlide(customerName, brief));
   // Every risk / watch item, kept off the customer-facing slides, on the very last slide.
   await insertGeneratedSlide(zip, await lastSlidePath(zip), referenceSlide(customerName, deckCallouts, brief));
-  // Last, so no later insert anchors on a removed slide: template pages for modules the account doesn't use.
-  await removeSlides(zip, unusedSlides);
+  // The improvement agenda, right before the leadership working session and priorities (slides 27–28).
+  const improvements = improvementsSlide(customerName, deckCallouts);
+  if (improvements) await insertGeneratedSlide(zip, "ppt/slides/slide25.xml", improvements);
+  await fillPriorities(zip, tokens, deckCallouts);
+  // Last, so no later insert anchors on a removed slide: template pages for modules the account doesn't
+  // use, and pages that only made sense for the sample customer the template was designed around.
+  await removeSlides(zip, [...unusedSlides, ...SAMPLE_CUSTOMER_SLIDES]);
 
   const buffer = await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
   return { buffer, brief };

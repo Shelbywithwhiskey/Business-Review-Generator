@@ -218,11 +218,10 @@ export interface RecommendationEvidence {
 }
 
 /**
- * Deterministic candidate recommendations ranked by how strongly the account's own
- * numbers support each one. Always returns up to 4 signal-backed items; callers pad
- * with an evergreen filler (e.g. "establish a regular reporting cadence") if fewer
- * than 4 signals fire. This is the fallback used verbatim when the AI engine is off,
- * and the only numeric grounding the AI engine is allowed to draw on when it's on.
+ * Deterministic candidate recommendations, most material first (money at stake, share of work
+ * affected). The slide shows the top 4; when fewer fire, the deck fills the rest from the account's
+ * own top improvement call-outs (see ebrExport), never from generic filler. This is the fallback used
+ * verbatim when the AI engine is off, and the only numeric grounding the AI engine may draw on.
  */
 function money(n: number): string {
   if (Math.abs(n) >= 1_000_000) return `$${(n / 1_000_000).toFixed(2)}M`;
@@ -318,7 +317,22 @@ export function computeRecommendationSignals(evidence: RecommendationEvidence): 
     });
   }
 
-  return signals;
+  // Most material first: money at stake and share of work affected decide which four make the slide.
+  const e = evidence;
+  const impact: Record<string, number> = {
+    completed_not_invoiced: 65 + (0.7 - (e.completedInvoicedRate ?? 0.7)) * 40,
+    invoice_aging_high: 60 + Math.min(30, e.invoicesAgedOver60Value / 10000),
+    quote_conversion_low: 60 + Math.min(25, e.quotesOpenValue / 20000),
+    missed_calls: 55 + Math.min(25, (e.missedCalls ?? 0) / 10),
+    on_time_low: 55 + (0.7 - (e.onTimeRate ?? 0.7)) * 50,
+    zuper_pay_opportunity: 50 + Math.min(20, e.paymentsTotalValue / 50000),
+    contracts_expiring: 50 + Math.min(20, (e.contractsExpiring90d ?? 0) * 4),
+    workflow_runs_failing: 50 + Math.min(20, e.workflowRunsFailed / 50),
+    no_workflows: 48,
+    workflows_need_attention: Math.min(60, 45 + e.workflowsNeedingAttention * 3),
+    inactive_workflows: 25,
+  };
+  return signals.sort((a, b) => (impact[b.key] ?? 0) - (impact[a.key] ?? 0));
 }
 
 export interface WorkflowRow {

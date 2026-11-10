@@ -17,6 +17,11 @@ export interface Callout {
   score: number;
   /** Area label shown on the Top Call-outs slide, e.g. "Jobs", "Collections". */
   area: string;
+  /**
+   * The concrete next step, for risks / watch items / opportunities — shown on the "What Could Be Done
+   * Better" page as "what we saw → what to do". Optional; `detail` is used when it's missing.
+   */
+  action?: string;
 }
 
 export const TONE_LABEL: Record<Tone, string> = { win: "WIN", risk: "RISK", opportunity: "OPPORTUNITY", watch: "WATCH" };

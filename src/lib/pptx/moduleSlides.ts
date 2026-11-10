@@ -27,6 +27,8 @@ import type { SharedDeckData } from "./ebrTokens";
 import { detectIndustry, type IndustryResult, type MetricKey } from "@/lib/reports/industry";
 import type { CallSummary, CoverageRow } from "@/lib/reports/catalogMetrics";
 import { generateStoryNarrative } from "@/lib/ai";
+import { computeCustomerRevenue, computeSpeedEfficiency, computeTeamProductivity } from "@/lib/reports/insights";
+import { customersRevenueSlide, speedSlide, teamProductivitySlide } from "./insightSlides";
 import { METRIC_TITLES, flowSlide, growthSlide, industrySlide, journeySlide, thenNowSlide, yearOverYearSlide, type MetricReading } from "./storySlides";
 
 const compact = (xs: (string | number | null | false | undefined)[]) => xs.filter((x): x is string => typeof x === "string" && x.length > 0);
@@ -1075,13 +1077,16 @@ export interface ModuleSlidesResult {
 export async function insertModuleSlides(zip: JSZip, input: ModuleDeckInput): Promise<ModuleSlidesResult> {
   const { customerId, range, shared } = input;
   const { sync, jobsDeep: jobs, quotesDeep: quotes, exec, catalog, delivery } = shared;
-  const [accounts, team, projects, invoices, portalPay, coverage] = await Promise.all([
+  const [accounts, team, projects, invoices, portalPay, coverage, customerRevenue, productivity, speed] = await Promise.all([
     computeAccountsDeepDive(customerId, range),
     computeWorkforceDeepDive(customerId, range),
     computeProjectsDeepDive(customerId, range),
     computeInvoiceDeepDive(customerId, range),
     computePortalAndPay(customerId, range),
     computeCoverage(customerId),
+    computeCustomerRevenue(customerId, range),
+    computeTeamProductivity(customerId, range),
+    computeSpeedEfficiency(customerId, range),
   ]);
   const ctx: DeckContext = { customerName: input.customerName, range, sync };
   const cctx = { customerName: input.customerName, range, syncLine: syncLine(ctx) };
@@ -1096,12 +1101,15 @@ export async function insertModuleSlides(zip: JSZip, input: ModuleDeckInput): Pr
     jobs.created > 0 ? jobsLifecycleSlide(ctx, jobs) : null,
     delivery.jobsInPeriod > 0 ? jobServiceSlide(cctx, delivery) : null,
     timeOnSiteSlide(cctx, delivery),
+    speedSlide(cctx, speed),
   ]);
   const hasAccounts = accounts.customers.total + accounts.organizations.total + accounts.properties.total > 0;
   const hasTeam = team.teamSize > 0 || team.jobsAssigned > 0 || team.timesheetEvents > 0;
   await insertChain(zip, "ppt/slides/slide15.xml", [
     hasAccounts ? accountsSlide(ctx, accounts) : null,
+    customersRevenueSlide(cctx, customerRevenue),
     hasTeam ? workforceSlide(ctx, team, jobs.created, tl ? { entries: tl.entries, hours: tl.hours, people: tl.people.length } : null) : null,
+    teamProductivitySlide(cctx, productivity),
     projects.total > 0 ? projectsSlide(ctx, projects) : null,
   ]);
   if (quotes.count > 0) await insertGeneratedSlide(zip, "ppt/slides/slide17.xml", quotesSlide(ctx, quotes));
