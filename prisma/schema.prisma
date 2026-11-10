@@ -7,10 +7,7 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  // Supabase: DATABASE_URL is the transaction pooler (port 6543) the app uses at runtime;
-  // DIRECT_URL is the session pooler (port 5432) that `prisma migrate` needs.
-  url       = env("DATABASE_URL")
-  directUrl = env("DIRECT_URL")
+  url      = env("DATABASE_URL")
 }
 
 model Customer {

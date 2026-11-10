@@ -2,7 +2,6 @@ import Link from "next/link";
 import { prisma } from "@/lib/db";
 import { Nav } from "@/components/Nav";
 import { DatabaseUnavailable } from "@/components/DatabaseUnavailable";
-import { StorageMeter } from "@/components/StorageMeter";
 import { isDatabaseUnavailable } from "@/lib/dbStatus";
 
 export const dynamic = "force-dynamic";
@@ -32,8 +31,6 @@ export default async function DashboardPage() {
       <Nav />
       <main className="mx-auto max-w-5xl px-6 py-8">
         <h1 className="mb-6 text-lg font-semibold">Customers</h1>
-
-        {customers !== null && <StorageMeter />}
 
         {customers === null ? (
           <DatabaseUnavailable />
