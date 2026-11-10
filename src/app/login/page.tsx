@@ -35,7 +35,7 @@ function LoginForm() {
         onSubmit={handleSubmit}
         className="w-full max-w-sm rounded-xl border border-neutral-800 bg-neutral-900 p-8 shadow-xl"
       >
-        <h1 className="mb-1 text-xl font-semibold text-neutral-100">CBR Generator</h1>
+        <h1 className="mb-1 text-xl font-semibold text-neutral-100">Business Review Generator</h1>
         <p className="mb-6 text-sm text-neutral-400">Sign in to continue</p>
         <input
           type="password"

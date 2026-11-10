@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Zuper CBR Generator",
+  title: "Business Review Generator",
   description: "Customer business review generator for Zuper accounts",
 };
 

@@ -1,4 +1,5 @@
-# One-time setup for the move to Supabase + the new Vercel project.
+# One-time setup for Business Review Generator on Supabase + its Vercel project.
+# Asks for the Supabase password (and the login password, if the file has none) in a popup.
 # Reads C:\Users\sharanraajbabu\supabase.txt (KEY=value lines), creates the tables in the new
 # Supabase database, and stores every setting in the linked Vercel project (Production).
 # Prints setting NAMES only, never values. Run from the repo root after `vercel link`.
@@ -12,6 +13,28 @@ foreach ($line in Get-Content $SecretsFile) {
 }
 if (-not $s.DATABASE_URL -and $s.TRANSACTION) { $s.DATABASE_URL = $s.TRANSACTION }
 if (-not $s.DIRECT_URL -and $s.SESSION) { $s.DIRECT_URL = $s.SESSION }
+# Small popup with a hidden-text box, so no secret has to be typed into a file or the chat.
+function Read-SecretPopup([string]$Title, [string]$Prompt) {
+  Add-Type -AssemblyName System.Windows.Forms
+  $form = New-Object Windows.Forms.Form -Property @{ Text = $Title; Width = 460; Height = 170; StartPosition = "CenterScreen"; TopMost = $true; FormBorderStyle = "FixedDialog"; MaximizeBox = $false; MinimizeBox = $false }
+  $label = New-Object Windows.Forms.Label -Property @{ Text = $Prompt; Left = 12; Top = 12; Width = 420; Height = 20 }
+  $box = New-Object Windows.Forms.TextBox -Property @{ Left = 12; Top = 38; Width = 420; UseSystemPasswordChar = $true }
+  $ok = New-Object Windows.Forms.Button -Property @{ Text = "OK"; Left = 352; Top = 72; Width = 80; DialogResult = "OK" }
+  $form.Controls.AddRange(@($label, $box, $ok)); $form.AcceptButton = $ok
+  if ($form.ShowDialog() -ne "OK" -or -not $box.Text) { throw "$Title was cancelled." }
+  return $box.Text
+}
+if (-not $s.SUPABASE_PASSWORD -and $s.DATABASE_URL -match '\[YOUR-PASSWORD\]') {
+  $s.SUPABASE_PASSWORD = Read-SecretPopup "Supabase password" "Type your Supabase database password, then click OK."
+}
+if (-not $s.APP_PASSWORD) {
+  $s.APP_PASSWORD = Read-SecretPopup "Tool login password" "Choose the password for logging in to Business Review Generator."
+}
+# The database password may be given on its own line instead of inside both URLs.
+if ($s.SUPABASE_PASSWORD) {
+  $enc = [Uri]::EscapeDataString($s.SUPABASE_PASSWORD)
+  foreach ($k in "DATABASE_URL", "DIRECT_URL") { if ($s[$k]) { $s[$k] = $s[$k].Replace("[YOUR-PASSWORD]", $enc) } }
+}
 
 foreach ($k in "DATABASE_URL", "DIRECT_URL", "APP_PASSWORD") {
   if (-not $s[$k]) { throw "$k is missing from $SecretsFile" }
@@ -23,7 +46,11 @@ foreach ($k in "DATABASE_URL", "DIRECT_URL") {
 if (([Uri]$s.DATABASE_URL).Port -ne 6543) { throw "DATABASE_URL should be the transaction pooler (port 6543)." }
 if (([Uri]$s.DIRECT_URL).Port -ne 5432) { throw "DIRECT_URL should be the session pooler (port 5432)." }
 
-function New-Secret { -join ((1..48) | ForEach-Object { '{0:x}' -f (Get-Random -Maximum 16) }) }
+function New-Secret {
+  $bytes = New-Object byte[] 32
+  [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+  -join ($bytes | ForEach-Object { $_.ToString("x2") })
+}
 
 Write-Host "1/2 Creating tables in Supabase..." -ForegroundColor Cyan
 $env:DATABASE_URL = $s.DATABASE_URL
