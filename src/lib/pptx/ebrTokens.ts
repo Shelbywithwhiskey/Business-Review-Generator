@@ -95,6 +95,8 @@ export interface EbrTokenData {
   notes: Record<string, SlideNotes>;
   /** Template slide path -> ranked call-outs (shown on-slide where there's room, and on the Top Call-outs slide). */
   callouts: Record<string, Callout[]>;
+  /** Template slides about modules the account doesn't use; removed once the deck is assembled. */
+  unusedSlides: string[];
 }
 
 /** Computed once per export and shared by the template tokens and the generated slides. */
@@ -600,5 +602,26 @@ export async function buildEbrTokenData(
     quoteValuePctChange,
   });
 
-  return { tokens, charts, usage, workflowSummary, periodLabel, fixups, notes, callouts };
+  // A module counts as in use if it has any activity in the period or the trailing 12 months the
+  // quarterly/monthly slides cover — so a recent drop-off still shows (and is called out), but a
+  // module the account never adopted doesn't fill the deck with zeros.
+  const usesQuotes = quotes.total > 0 || quarters.some((q) => q.quotesSent > 0) || months.some((m) => m.acceptedQuoteValue + m.unacceptedQuoteValue > 0);
+  const usesInvoices = invoices.billable > 0 || quarters.some((q) => q.invoicesInvoicedValue > 0) || months.some((m) => m.invoiceCount > 0);
+  const unusedSlides = [
+    !usesQuotes && "ppt/slides/slide17.xml", // Quote Performance — Quarterly
+    !usesInvoices && "ppt/slides/slide18.xml", // Invoice & Collections — Quarterly
+    !usesQuotes && !usesInvoices && "ppt/slides/slide16.xml", // Revenue & Quote Performance
+    !usesQuotes && !usesInvoices && "ppt/slides/slide19.xml", // Invoice & Quote Value trend
+  ].filter((s): s is string => !!s);
+  // Business Performance Overview keeps its layout; an unused module's card says so instead of showing zeros.
+  const notInUse = (prefix: "QUOTES" | "INVOICES", noun: string, rateRun: { index: number; expect: string }) => {
+    for (const key of Object.keys(tokens)) if (key.startsWith(`${prefix}_`)) tokens[key] = "";
+    tokens[`${prefix}_TOTAL_VALUE`] = "Not in use";
+    tokens[`${prefix}_TOTAL_LABEL`] = `No ${noun} in Zuper in the last 12 months`;
+    (fixups["ppt/slides/slide13.xml"] ??= []).push({ ...rateRun, text: "" });
+  };
+  if (!usesQuotes) notInUse("QUOTES", "quotes", { index: 15, expect: "acceptance rate" });
+  if (!usesInvoices) notInUse("INVOICES", "invoices", { index: 22, expect: "collection rate" });
+
+  return { tokens, charts, usage, workflowSummary, periodLabel, fixups, notes, callouts, unusedSlides };
 }

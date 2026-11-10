@@ -1119,8 +1119,13 @@ export async function insertModuleSlides(zip: JSZip, input: ModuleDeckInput): Pr
   const jobsAllTime = jobs.created;
   const own = catalog.filter((m) => !SHOWN_ELSEWHERE.has(m.key) && !SETUP_MODULES.has(m.key));
   const setup = catalog.filter((m) => SETUP_MODULES.has(m.key));
+  // No Connect data: the slide would be an empty box, so leave it out — its opportunity/watch
+  // call-out still reaches the Account Brief and the reference slide.
+  const connect = byKey.has("connect_calls") || byKey.has("connect_sms") ? connectSlide(cctx, byKey.get("connect_calls"), byKey.get("connect_sms"), coverage) : null;
+  const connectHasData = !!byKey.get("connect_calls")?.calls;
+  if (connect && !connectHasData) collectCallouts(zip, connect.callouts);
   await insertChain(zip, executions, [
-    byKey.has("connect_calls") || byKey.has("connect_sms") ? connectSlide(cctx, byKey.get("connect_calls"), byKey.get("connect_sms"), coverage) : null,
+    connectHasData ? connect : null,
     ...own.map((m) => moduleSlide(cctx, m, { quotesInPeriod: quotesTotal, jobsInPeriod: jobsAllTime })),
     setupSlide(cctx, setup),
     ...coverageSlides(cctx, coverage),

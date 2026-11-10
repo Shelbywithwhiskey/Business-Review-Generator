@@ -391,3 +391,60 @@ export async function insertGeneratedSlide(zip: JSZip, afterSlide: string, shape
   }
   return `ppt/slides/${slideName}`;
 }
+
+/**
+ * Takes slides out of the deck with the parts only they use (charts + their workbooks, speaker notes).
+ * Call it last: insertGeneratedSlide anchors on template slides and reuses free slideN/chartN names.
+ */
+export async function removeSlides(zip: JSZip, slidePaths: string[]): Promise<void> {
+  if (!slidePaths.length) return;
+  const presRelsPath = "ppt/_rels/presentation.xml.rels";
+  const presPath = "ppt/presentation.xml";
+  const ctPath = "[Content_Types].xml";
+  let presRels = await readText(zip, presRelsPath);
+  let pres = await readText(zip, presPath);
+  let contentTypes = await readText(zip, ctPath);
+  const dropPart = (partPath: string) => {
+    zip.remove(partPath);
+    zip.remove(partPath.replace(/\/([^/]+)$/, "/_rels/$1.rels"));
+    contentTypes = contentTypes.replace(new RegExp(`<Override PartName="/${partPath.replace(/[.[\]]/g, "\\$&")}"[^>]*/>`), "");
+  };
+  // "../charts/chart3.xml" relative to "ppt/slides/" -> "ppt/charts/chart3.xml"
+  const resolve = (fromDir: string, target: string) => {
+    const parts = fromDir.split("/");
+    for (const seg of target.split("/")) seg === ".." ? parts.pop() : parts.push(seg);
+    return parts.join("/");
+  };
+
+  for (const slidePath of slidePaths) {
+    if (!zip.file(slidePath)) continue;
+    const target = slidePath.replace(/^ppt\//, "");
+    const relTag = (presRels.match(/<Relationship [^>]*\/>/g) ?? []).find((t) => readAttr(t, "Target") === target);
+    const rId = relTag && readAttr(relTag, "Id");
+    if (!relTag || !rId) continue;
+    presRels = presRels.replace(relTag, "");
+    pres = pres.replace(new RegExp(`<p:sldId [^>]*r:id="${rId}"[^>]*/>`), "");
+
+    const slideRelsPath = slidePath.replace("slides/", "slides/_rels/") + ".rels";
+    const slideRels = zip.file(slideRelsPath) ? await readText(zip, slideRelsPath) : "";
+    for (const tag of slideRels.match(/<Relationship [^>]*\/>/g) ?? []) {
+      const type = readAttr(tag, "Type") ?? "";
+      const part = resolve("ppt/slides", readAttr(tag, "Target") ?? "");
+      if (type.endsWith("/notesSlide")) dropPart(part);
+      if (type.endsWith("/chart")) {
+        const chartRelsPath = part.replace("charts/", "charts/_rels/") + ".rels";
+        const chartRels = zip.file(chartRelsPath) ? await readText(zip, chartRelsPath) : "";
+        for (const t of chartRels.match(/<Relationship [^>]*\/>/g) ?? []) {
+          const sub = resolve("ppt/charts", readAttr(t, "Target") ?? "");
+          if (sub.startsWith("ppt/")) zip.remove(sub); // embedded workbook / colors / style (defaults cover them in content types)
+          contentTypes = contentTypes.replace(new RegExp(`<Override PartName="/${sub.replace(/[.[\]]/g, "\\$&")}"[^>]*/>`), "");
+        }
+        dropPart(part);
+      }
+    }
+    dropPart(slidePath);
+  }
+  zip.file(presRelsPath, presRels);
+  zip.file(presPath, pres);
+  zip.file(ctPath, contentTypes);
+}

@@ -4,7 +4,7 @@ import JSZip from "jszip";
 import type { DateRange } from "@/lib/zuper/modules";
 import { buildEbrTokenData, computeSharedDeckData, type RunFix } from "./ebrTokens";
 import { setSlideNotes } from "./slideNotes";
-import { ShapeWriter, appendShapesToSlide, collectCallouts, collectedCallouts, insertGeneratedSlide } from "./generatedSlide";
+import { ShapeWriter, appendShapesToSlide, collectCallouts, collectedCallouts, insertGeneratedSlide, removeSlides } from "./generatedSlide";
 import { calloutLine } from "@/lib/reports/callouts";
 import { buildAccountBrief, type AccountBrief } from "@/lib/reports/accountBrief";
 import { accountBriefSlide, lastSlidePath, referenceSlide } from "./briefSlide";
@@ -71,7 +71,7 @@ export async function generateEbrPptx(options: GenerateEbrPptxOptions): Promise<
   const { customerId, customerName, customerWebsite, range, reportTitle } = options;
 
   const shared = await computeSharedDeckData(customerId, range, customerWebsite ?? null);
-  const [templateBuffer, { tokens, charts, usage, workflowSummary, periodLabel, fixups, notes, callouts }] = await Promise.all([
+  const [templateBuffer, { tokens, charts, usage, workflowSummary, periodLabel, fixups, notes, callouts, unusedSlides }] = await Promise.all([
     readFile(TEMPLATE_PATH),
     buildEbrTokenData(customerId, customerName, customerWebsite ?? null, range, reportTitle, shared),
   ]);
@@ -138,6 +138,8 @@ export async function generateEbrPptx(options: GenerateEbrPptxOptions): Promise<
   await insertGeneratedSlide(zip, modules.topCalloutsPath, accountBriefSlide(customerName, brief));
   // Every risk / watch item, kept off the customer-facing slides, on the very last slide.
   await insertGeneratedSlide(zip, await lastSlidePath(zip), referenceSlide(customerName, deckCallouts, brief));
+  // Last, so no later insert anchors on a removed slide: template pages for modules the account doesn't use.
+  await removeSlides(zip, unusedSlides);
 
   const buffer = await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
   return { buffer, brief };
