@@ -3,6 +3,7 @@ import { prisma } from "@/lib/db";
 import { Nav } from "@/components/Nav";
 import { DatabaseUnavailable } from "@/components/DatabaseUnavailable";
 import { StorageMeter } from "@/components/StorageMeter";
+import { DeleteCustomerButton } from "@/components/DeleteCustomerButton";
 import { isDatabaseUnavailable } from "@/lib/dbStatus";
 
 export const dynamic = "force-dynamic";
@@ -67,22 +68,22 @@ export default async function DashboardPage() {
           <div className="divide-y divide-neutral-200 rounded-lg border border-neutral-200 dark:divide-neutral-800 dark:border-neutral-800">
             {customers.map((c) => {
               const lastSync = c.syncRuns[0];
+              // The row opens the account; Delete sits beside the link (a button inside a link would navigate too).
               return (
-                <Link
-                  key={c.id}
-                  href={`/customers/${c.id}`}
-                  className="flex items-center justify-between px-4 py-3 hover:bg-neutral-50 dark:hover:bg-neutral-900"
-                >
-                  <div>
-                    <div className="font-medium">{c.name}</div>
-                    <div className="text-sm text-neutral-500">Zuper account: {c.zuperAccountId}</div>
-                  </div>
-                  <div className="text-right text-sm text-neutral-500">
-                    <div>{c.credential?.lastVerifiedAt ? "Connection verified" : "Not connected yet"}</div>
-                    <div>{lastSync ? `Last sync: ${lastSync.status}` : "Never synced"}</div>
-                    <div>{(records.get(c.id) ?? 0).toLocaleString("en-US")} records stored</div>
-                  </div>
-                </Link>
+                <div key={c.id} className="flex items-center gap-3 pr-4 hover:bg-neutral-50 dark:hover:bg-neutral-900">
+                  <Link href={`/customers/${c.id}`} className="flex flex-1 items-center justify-between px-4 py-3">
+                    <div>
+                      <div className="font-medium">{c.name}</div>
+                      <div className="text-sm text-neutral-500">Zuper account: {c.zuperAccountId}</div>
+                    </div>
+                    <div className="text-right text-sm text-neutral-500">
+                      <div>{c.credential?.lastVerifiedAt ? "Connection verified" : "Not connected yet"}</div>
+                      <div>{lastSync ? `Last sync: ${lastSync.status}` : "Never synced"}</div>
+                      <div>{(records.get(c.id) ?? 0).toLocaleString("en-US")} records stored</div>
+                    </div>
+                  </Link>
+                  <DeleteCustomerButton id={c.id} name={c.name} />
+                </div>
               );
             })}
           </div>
